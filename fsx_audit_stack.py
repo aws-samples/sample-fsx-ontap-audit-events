@@ -8,6 +8,7 @@ from aws_cdk import (
     aws_lambda as lambda_,
     aws_events as events,
     aws_events_targets as targets,
+    aws_iam as iam,
 )
 from constructs import Construct
 
@@ -107,6 +108,36 @@ class FsxAuditStack(Stack):
         )
         
         schedule_rule.add_target(targets.LambdaFunction(audit_processor))
+
+        # Grant IAM permissions to audit processor Lambda
+        state_table.grant_read_write_data(audit_processor)
+        queue.grant_send_messages(audit_processor)
+        
+        # Grant S3 permissions for audit log access
+        audit_processor.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:GetObject", "s3:ListBucket"],
+                resources=[
+                    f"arn:aws:s3:::{audit_s3_access_point_alias or '*'}",
+                    f"arn:aws:s3:::{audit_s3_access_point_alias or '*'}/*",
+                ],
+                effect=iam.Effect.ALLOW,
+            )
+        )
+
+        # Grant IAM permissions to file processor Lambda
+        file_processor.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:GetObject", "s3:PutObject"],
+                resources=[
+                    f"arn:aws:s3:::{file_s3_access_point_alias or '*'}/*",
+                ],
+                effect=iam.Effect.ALLOW,
+            )
+        )
+
+        # Grant SQS permissions to file processor (will be configured with SQS trigger in later tasks)
+        queue.grant_consume_messages(file_processor)
 
         # Stack outputs
         CfnOutput(

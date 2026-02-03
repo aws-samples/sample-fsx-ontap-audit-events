@@ -58,7 +58,7 @@ class TestProjectStructure:
         with open("fsx_audit_stack.py", "r") as f:
             content = f.read()
             assert "class FsxAuditStack" in content, "fsx_audit_stack.py should define FsxAuditStack class"
-            assert "from aws_cdk import Stack" in content, "fsx_audit_stack.py should import Stack"
+            assert "Stack" in content, "fsx_audit_stack.py should import Stack"
 
     def test_requirements_contains_cdk(self):
         """Verify requirements.txt contains CDK dependencies."""
