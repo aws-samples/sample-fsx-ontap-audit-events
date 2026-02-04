@@ -1,23 +1,405 @@
 """
-Audit Log Processor Lambda Handler.
+FSx ONTAP Audit Log Processor Lambda Function
 
-This Lambda function processes FSx ONTAP audit logs to extract file events.
+Processes ONTAP audit logs (XML/EVTX format) to extract file creation events.
+Uses checkpoint-based approach with DynamoDB for efficient processing.
 """
+
+import boto3
+import json
+import os
+import xml.etree.ElementTree as ET
+from datetime import datetime
+from typing import List, Dict, Optional
+
+# Initialize AWS clients
+s3 = boto3.client('s3')
+sqs = boto3.client('sqs')
+dynamodb = boto3.resource('dynamodb')
+
+# Environment variables
+BUCKET = os.environ.get('BUCKET', '')
+AUDIT_PREFIX = os.environ.get('AUDIT_PREFIX', 'audit/')
+TABLE_NAME = os.environ.get('TABLE_NAME', '')
+QUEUE_URL = os.environ.get('QUEUE_URL', '')
+MAX_KEYS = int(os.environ.get('MAX_KEYS', '100'))
+
+# DynamoDB table
+if TABLE_NAME:
+    table = dynamodb.Table(TABLE_NAME)
+else:
+    table = None
+
+# Try to import EVTX parser (optional)
+try:
+    from evtx import PyEvtxParser
+    EVTX_AVAILABLE = True
+except ImportError:
+    EVTX_AVAILABLE = False
+    print("EVTX parser not available")
 
 
 def lambda_handler(event, context):
-    """
-    Process audit logs and extract file creation events.
+    """Main Lambda handler for audit log processing."""
+    print(f"Starting audit log processing at {datetime.utcnow().isoformat()}")
     
-    Args:
-        event: EventBridge scheduled event
-        context: Lambda context
-        
-    Returns:
-        dict: Status and processing results
-    """
-    # TODO: Implement audit log processing logic in subsequent tasks
+    # Step 1: Get checkpoint from DynamoDB
+    checkpoint = get_checkpoint()
+    last_processed = checkpoint.get('last_processed_log', '')
+    
+    # First run: skip to latest log to avoid processing backlog
+    if not last_processed:
+        last_processed = initialize_checkpoint_to_latest()
+        if not last_processed:
+            print("No logs found, waiting for first log")
+            return {'statusCode': 200, 'logs_processed': 0}
+    
+    print(f"Last processed log: {last_processed}")
+    
+    # Step 2: List new audit logs using StartAfter optimization
+    new_logs = list_new_logs(last_processed)
+    
+    if not new_logs:
+        print("No new logs to process")
+        return {'statusCode': 200, 'logs_processed': 0}
+    
+    print(f"Found {len(new_logs)} new logs to process")
+    
+    # Step 3: Process each log
+    events_processed = 0
+    last_log = last_processed
+    
+    for log_key in new_logs:
+        try:
+            events = process_audit_log(log_key)
+            if events:
+                send_to_sqs_batch(events)
+                events_processed += len(events)
+            
+            # Update last processed log
+            last_log = extract_filename(log_key)
+            
+        except Exception as e:
+            print(f"Error processing {log_key}: {e}")
+            # Continue processing other logs
+            continue
+    
+    # Step 4: Update checkpoint
+    update_checkpoint(last_log, len(new_logs))
+    
+    print(f"Processed {len(new_logs)} logs, found {events_processed} file events")
+    
     return {
         'statusCode': 200,
-        'body': 'Audit processor placeholder'
+        'logs_processed': len(new_logs),
+        'events_found': events_processed,
+        'last_processed': last_log
     }
+
+
+def get_checkpoint() -> Dict:
+    """Get checkpoint from DynamoDB."""
+    try:
+        response = table.get_item(Key={'pk': 'tracker'})
+        return response.get('Item', {
+            'pk': 'tracker',
+            'last_processed_log': '',
+            'last_check_time': '2000-01-01T00:00:00Z',
+            'processed_count': 0
+        })
+    except Exception as e:
+        print(f"Error reading checkpoint: {e}")
+        return {
+            'pk': 'tracker',
+            'last_processed_log': '',
+            'last_check_time': '2000-01-01T00:00:00Z',
+            'processed_count': 0
+        }
+
+
+def update_checkpoint(last_log: str, count: int):
+    """Update checkpoint in DynamoDB."""
+    try:
+        table.update_item(
+            Key={'pk': 'tracker'},
+            UpdateExpression='SET last_processed_log = :log, last_check_time = :time, processed_count = if_not_exists(processed_count, :zero) + :count',
+            ExpressionAttributeValues={
+                ':log': last_log,
+                ':time': datetime.utcnow().isoformat(),
+                ':count': count,
+                ':zero': 0
+            }
+        )
+    except Exception as e:
+        print(f"Error updating checkpoint: {e}")
+        raise
+
+
+def initialize_checkpoint_to_latest() -> str:
+    """On first run, skip to the latest completed log to avoid backlog processing."""
+    try:
+        response = s3.list_objects_v2(Bucket=BUCKET, Prefix=AUDIT_PREFIX, MaxKeys=1000)
+        if 'Contents' not in response:
+            return ''
+        
+        all_logs = sorted([obj['Key'] for obj in response['Contents']])
+        # Filter out active log
+        completed = [l for l in all_logs if '_last.' not in l]
+        
+        if not completed:
+            return ''
+        
+        # Use second-to-last log as checkpoint (last completed one)
+        latest = extract_filename(completed[-1])
+        print(f"First run: initializing checkpoint to latest log: {latest}")
+        update_checkpoint(latest, 0)
+        return latest
+    except Exception as e:
+        print(f"Error initializing checkpoint: {e}")
+        return ''
+
+
+def list_new_logs(last_processed: str) -> List[str]:
+    """List new audit logs using StartAfter optimization."""
+    try:
+        params = {
+            'Bucket': BUCKET,
+            'Prefix': AUDIT_PREFIX,
+            'MaxKeys': MAX_KEYS
+        }
+        
+        # Use StartAfter for efficient pagination
+        if last_processed:
+            params['StartAfter'] = f"{AUDIT_PREFIX}{last_processed}"
+        
+        print(f"Listing S3 objects with params: {params}")
+        response = s3.list_objects_v2(**params)
+        print(f"S3 response: IsTruncated={response.get('IsTruncated')}, KeyCount={response.get('KeyCount', 0)}")
+        
+        if 'Contents' not in response:
+            print("No Contents in S3 response")
+            return []
+        
+        all_logs = [obj['Key'] for obj in response['Contents']]
+        print(f"Found {len(all_logs)} total objects")
+        
+        # Identify and filter out active log
+        is_truncated = response.get('IsTruncated', False)
+        active_log = identify_active_log(all_logs, is_truncated)
+        
+        if active_log:
+            print(f"Active log identified: {active_log}")
+        
+        completed_logs = [log for log in all_logs if log != active_log]
+        completed_logs.sort()  # Ensure chronological order
+        
+        print(f"Completed logs to process: {len(completed_logs)}")
+        
+        return completed_logs
+        
+    except Exception as e:
+        print(f"Error listing logs: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+
+def identify_active_log(logs: List[str], is_truncated: bool) -> Optional[str]:
+    """Identify the active log file being written."""
+    # Check for _last.xml or _last.evtx
+    for log in logs:
+        if '_last.' in log:
+            return log
+    
+    # If not truncated and we have logs, newest (last) file is active
+    if not is_truncated and logs:
+        return logs[-1]
+    
+    return None
+
+
+def process_audit_log(log_key: str) -> List[Dict]:
+    """Process a single audit log file."""
+    print(f"Processing: {log_key}")
+    
+    try:
+        # Download file from S3
+        response = s3.get_object(Bucket=BUCKET, Key=log_key)
+        content = response['Body'].read()
+        
+        # Auto-detect format by extension
+        if log_key.endswith('.xml'):
+            events = parse_xml_audit(content, log_key)
+        elif log_key.endswith('.evtx'):
+            events = parse_evtx_audit(content, log_key)
+        else:
+            print(f"Unknown format for {log_key}")
+            return []
+        
+        print(f"Found {len(events)} file events in {log_key}")
+        return events
+        
+    except Exception as e:
+        print(f"Error processing {log_key}: {e}")
+        raise
+
+
+def parse_xml_audit(content: bytes, log_key: str) -> List[Dict]:
+    """Parse Windows Event Log XML format with namespace support."""
+    events = []
+    
+    try:
+        root = ET.fromstring(content)
+        
+        # Handle XML namespace
+        ns = {'ns': 'http://www.netapp.com/schemas/ONTAP/2007/AuditLog'}
+        
+        # Find all Event elements (try with namespace first, then without)
+        event_elements = root.findall('.//ns:Event', ns)
+        if not event_elements:
+            event_elements = root.findall('.//Event')
+        
+        print(f"Found {len(event_elements)} Event elements in XML")
+        
+        for event_elem in event_elements:
+            # Try with namespace first, then without (use explicit None check)
+            system = event_elem.find('ns:System', ns)
+            if system is None:
+                system = event_elem.find('System')
+            event_data = event_elem.find('ns:EventData', ns)
+            if event_data is None:
+                event_data = event_elem.find('EventData')
+            
+            if system is None or event_data is None:
+                continue
+            
+            # Extract event ID (use explicit None check)
+            event_id_elem = system.find('ns:EventID', ns)
+            if event_id_elem is None:
+                event_id_elem = system.find('EventID')
+            if event_id_elem is None:
+                continue
+            
+            event_id = event_id_elem.text
+            
+            # Filter for file creation (4656)
+            if event_id != '4656':
+                continue
+            
+            # Extract object type and name
+            object_type = get_event_data_value(event_data, 'ObjectType', ns)
+            object_name = get_event_data_value(event_data, 'ObjectName', ns)
+            
+            # Filter for files only
+            if object_type != 'File' or not object_name:
+                continue
+            
+            # Parse object name: (unix);/path/to/file or (ntfs);/path/to/file
+            file_path = object_name.split(';', 1)[1] if ';' in object_name else object_name
+            
+            # Extract timestamp
+            time_created = system.find('ns:TimeCreated', ns) or system.find('TimeCreated')
+            timestamp = time_created.get('SystemTime') if time_created is not None else ''
+            
+            events.append({
+                'file_path': file_path,
+                'operation': 'create',
+                'timestamp': timestamp,
+                'user': get_event_data_value(event_data, 'SubjectUserName', ns, 'unknown'),
+                'user_ip': get_event_data_value(event_data, 'SubjectIP', ns, ''),
+                'source_log': log_key,
+                'format': 'xml',
+                'event_id': event_id
+            })
+    
+    except Exception as e:
+        print(f"Error parsing XML: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return events
+
+
+def parse_evtx_audit(content: bytes, log_key: str) -> List[Dict]:
+    """Parse EVTX format audit log."""
+    events = []
+    
+    if not EVTX_AVAILABLE:
+        print("EVTX parser not available")
+        return events
+    
+    try:
+        parser = PyEvtxParser(content)
+        
+        for record in parser.records():
+            event_id = str(record.get('event_id', ''))
+            
+            # Filter for file creation (4656)
+            if event_id != '4656':
+                continue
+            
+            event_data = record.get('event_data', {})
+            object_type = event_data.get('ObjectType', '')
+            object_name = event_data.get('ObjectName', '')
+            
+            # Filter for files only
+            if object_type != 'File' or not object_name:
+                continue
+            
+            # Parse object name
+            file_path = object_name.split(';', 1)[1] if ';' in object_name else object_name
+            
+            events.append({
+                'file_path': file_path,
+                'operation': 'create',
+                'timestamp': record.get('timestamp', ''),
+                'user': event_data.get('SubjectUserName', 'unknown'),
+                'user_ip': event_data.get('SubjectIP', ''),
+                'source_log': log_key,
+                'format': 'evtx',
+                'event_id': event_id
+            })
+    
+    except Exception as e:
+        print(f"Error parsing EVTX: {e}")
+    
+    return events
+
+
+def get_event_data_value(event_data, name: str, ns: dict, default: str = '') -> str:
+    """Extract value from EventData by Name attribute with namespace support."""
+    # Try with namespace first
+    for data in event_data.findall('ns:Data', ns):
+        if data.get('Name') == name:
+            return data.text or default
+    
+    # Fallback without namespace
+    for data in event_data.findall('Data'):
+        if data.get('Name') == name:
+            return data.text or default
+    
+    return default
+
+
+def send_to_sqs_batch(events: List[Dict]):
+    """Send events to SQS in batches of 10."""
+    for i in range(0, len(events), 10):
+        batch = events[i:i+10]
+        entries = [
+            {
+                'Id': str(j),
+                'MessageBody': json.dumps(event)
+            }
+            for j, event in enumerate(batch)
+        ]
+        
+        try:
+            sqs.send_message_batch(QueueUrl=QUEUE_URL, Entries=entries)
+        except Exception as e:
+            print(f"Error sending batch to SQS: {e}")
+            raise
+
+
+def extract_filename(log_key: str) -> str:
+    """Extract filename from S3 key."""
+    return log_key.replace(f"{AUDIT_PREFIX}", '')

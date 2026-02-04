@@ -1,0 +1,277 @@
+"""
+Unit tests for audit processor Lambda function.
+"""
+
+import pytest
+import json
+import xml.etree.ElementTree as ET
+from unittest.mock import Mock, patch, MagicMock
+import sys
+import os
+
+# Add lambda directory to path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lambda', 'audit_processor'))
+
+import index
+
+
+class TestCheckpointManagement:
+    """Test checkpoint read/write operations."""
+    
+    @patch('index.table')
+    def test_get_checkpoint_existing(self, mock_table):
+        """Test reading existing checkpoint."""
+        mock_table.get_item.return_value = {
+            'Item': {
+                'pk': 'tracker',
+                'last_processed_log': 'audit_test_D2026-02-03-T15-00-00_0000000000.xml',
+                'last_check_time': '2026-02-03T15:10:00Z',
+                'processed_count': 100
+            }
+        }
+        
+        checkpoint = index.get_checkpoint()
+        
+        assert checkpoint['last_processed_log'] == 'audit_test_D2026-02-03-T15-00-00_0000000000.xml'
+        assert checkpoint['processed_count'] == 100
+    
+    @patch('index.table')
+    def test_get_checkpoint_first_run(self, mock_table):
+        """Test reading checkpoint on first run."""
+        mock_table.get_item.return_value = {}
+        
+        checkpoint = index.get_checkpoint()
+        
+        assert checkpoint['last_processed_log'] == ''
+        assert checkpoint['processed_count'] == 0
+    
+    @patch('index.table')
+    def test_update_checkpoint(self, mock_table):
+        """Test updating checkpoint."""
+        index.update_checkpoint('audit_test_D2026-02-03-T15-05-00_0000000000.xml', 5)
+        
+        mock_table.update_item.assert_called_once()
+        call_args = mock_table.update_item.call_args
+        
+        assert call_args[1]['Key'] == {'pk': 'tracker'}
+        assert ':log' in call_args[1]['ExpressionAttributeValues']
+
+
+class TestAuditLogListing:
+    """Test S3 listing with StartAfter optimization."""
+    
+    @patch('index.s3')
+    def test_list_new_logs_with_checkpoint(self, mock_s3):
+        """Test listing with existing checkpoint."""
+        mock_s3.list_objects_v2.return_value = {
+            'Contents': [
+                {'Key': 'audit/audit_test_D2026-02-03-T15-05-00_0000000000.xml'},
+                {'Key': 'audit/audit_test_D2026-02-03-T15-10-00_0000000000.xml'},
+            ],
+            'IsTruncated': False
+        }
+        
+        logs = index.list_new_logs('audit_test_D2026-02-03-T15-00-00_0000000000.xml')
+        
+        # Should filter out last log (active)
+        assert len(logs) == 1
+        assert logs[0] == 'audit/audit_test_D2026-02-03-T15-05-00_0000000000.xml'
+    
+    @patch('index.s3')
+    def test_list_new_logs_empty(self, mock_s3):
+        """Test listing with no new logs."""
+        mock_s3.list_objects_v2.return_value = {}
+        
+        logs = index.list_new_logs('audit_test_D2026-02-03-T15-00-00_0000000000.xml')
+        
+        assert logs == []
+    
+    def test_identify_active_log_with_last_marker(self):
+        """Test identifying active log with _last marker."""
+        logs = [
+            'audit/audit_test_D2026-02-03-T15-00-00_0000000000.xml',
+            'audit/audit_test_last.xml'
+        ]
+        
+        active = index.identify_active_log(logs, is_truncated=False)
+        
+        assert active == 'audit/audit_test_last.xml'
+    
+    def test_identify_active_log_newest_file(self):
+        """Test identifying active log as newest file."""
+        logs = [
+            'audit/audit_test_D2026-02-03-T15-00-00_0000000000.xml',
+            'audit/audit_test_D2026-02-03-T15-05-00_0000000000.xml'
+        ]
+        
+        active = index.identify_active_log(logs, is_truncated=False)
+        
+        assert active == 'audit/audit_test_D2026-02-03-T15-05-00_0000000000.xml'
+    
+    def test_identify_active_log_truncated(self):
+        """Test identifying active log when results are truncated."""
+        logs = [
+            'audit/audit_test_D2026-02-03-T15-00-00_0000000000.xml',
+            'audit/audit_test_D2026-02-03-T15-05-00_0000000000.xml'
+        ]
+        
+        active = index.identify_active_log(logs, is_truncated=True)
+        
+        assert active is None
+
+
+class TestXMLParsing:
+    """Test XML audit log parsing."""
+    
+    def test_parse_xml_file_creation(self):
+        """Test parsing file creation event."""
+        xml_content = '''<?xml version="1.0" encoding="UTF-8"?>
+<Events>
+  <Event>
+    <System>
+      <EventID>4656</EventID>
+      <TimeCreated SystemTime="2026-02-03T20:33:06.809779000Z"/>
+    </System>
+    <EventData>
+      <Data Name="SubjectUserName">testuser</Data>
+      <Data Name="ObjectType">File</Data>
+      <Data Name="ObjectName">(ntfs);/data/test.jpg</Data>
+      <Data Name="SubjectIP">172.31.18.58</Data>
+    </EventData>
+  </Event>
+</Events>'''
+        
+        events = index.parse_xml_audit(xml_content.encode(), 'test.xml')
+        
+        assert len(events) == 1
+        assert events[0]['file_path'] == '/data/test.jpg'
+        assert events[0]['operation'] == 'create'
+        assert events[0]['user'] == 'testuser'
+        assert events[0]['event_id'] == '4656'
+    
+    def test_parse_xml_filter_directories(self):
+        """Test filtering out directory events."""
+        xml_content = '''<?xml version="1.0" encoding="UTF-8"?>
+<Events>
+  <Event>
+    <System>
+      <EventID>4656</EventID>
+      <TimeCreated SystemTime="2026-02-03T20:33:06Z"/>
+    </System>
+    <EventData>
+      <Data Name="ObjectType">Directory</Data>
+      <Data Name="ObjectName">(ntfs);/data/</Data>
+    </EventData>
+  </Event>
+</Events>'''
+        
+        events = index.parse_xml_audit(xml_content.encode(), 'test.xml')
+        
+        assert len(events) == 0
+    
+    def test_parse_xml_filter_non_create_events(self):
+        """Test filtering non-4656 events."""
+        xml_content = '''<?xml version="1.0" encoding="UTF-8"?>
+<Events>
+  <Event>
+    <System>
+      <EventID>4663</EventID>
+      <TimeCreated SystemTime="2026-02-03T20:33:06Z"/>
+    </System>
+    <EventData>
+      <Data Name="ObjectType">File</Data>
+      <Data Name="ObjectName">(ntfs);/data/test.jpg</Data>
+    </EventData>
+  </Event>
+</Events>'''
+        
+        events = index.parse_xml_audit(xml_content.encode(), 'test.xml')
+        
+        assert len(events) == 0
+    
+    def test_get_event_data_value(self):
+        """Test extracting values from EventData."""
+        xml_content = '''<EventData>
+  <Data Name="SubjectUserName">testuser</Data>
+  <Data Name="ObjectType">File</Data>
+</EventData>'''
+        
+        event_data = ET.fromstring(xml_content)
+        
+        assert index.get_event_data_value(event_data, 'SubjectUserName') == 'testuser'
+        assert index.get_event_data_value(event_data, 'ObjectType') == 'File'
+        assert index.get_event_data_value(event_data, 'Missing', 'default') == 'default'
+
+
+class TestSQSPublishing:
+    """Test SQS message publishing."""
+    
+    @patch('index.sqs')
+    def test_send_to_sqs_batch_single(self, mock_sqs):
+        """Test sending single batch to SQS."""
+        events = [
+            {'file_path': '/data/test1.jpg', 'operation': 'create'},
+            {'file_path': '/data/test2.jpg', 'operation': 'create'}
+        ]
+        
+        index.send_to_sqs_batch(events)
+        
+        mock_sqs.send_message_batch.assert_called_once()
+        call_args = mock_sqs.send_message_batch.call_args
+        
+        assert len(call_args[1]['Entries']) == 2
+    
+    @patch('index.sqs')
+    def test_send_to_sqs_batch_multiple(self, mock_sqs):
+        """Test sending multiple batches to SQS."""
+        events = [{'file_path': f'/data/test{i}.jpg', 'operation': 'create'} for i in range(25)]
+        
+        index.send_to_sqs_batch(events)
+        
+        # Should be called 3 times (10 + 10 + 5)
+        assert mock_sqs.send_message_batch.call_count == 3
+
+
+class TestLambdaHandler:
+    """Test main Lambda handler."""
+    
+    @patch('index.update_checkpoint')
+    @patch('index.send_to_sqs_batch')
+    @patch('index.process_audit_log')
+    @patch('index.list_new_logs')
+    @patch('index.get_checkpoint')
+    def test_lambda_handler_success(self, mock_get_checkpoint, mock_list_logs, 
+                                    mock_process_log, mock_send_sqs, mock_update_checkpoint):
+        """Test successful Lambda execution."""
+        mock_get_checkpoint.return_value = {'last_processed_log': ''}
+        mock_list_logs.return_value = ['audit/test1.xml', 'audit/test2.xml']
+        mock_process_log.return_value = [
+            {'file_path': '/data/test.jpg', 'operation': 'create'}
+        ]
+        
+        result = index.lambda_handler({}, None)
+        
+        assert result['statusCode'] == 200
+        assert result['logs_processed'] == 2
+        assert result['events_found'] == 2
+    
+    @patch('index.get_checkpoint')
+    @patch('index.list_new_logs')
+    def test_lambda_handler_no_new_logs(self, mock_list_logs, mock_get_checkpoint):
+        """Test Lambda execution with no new logs."""
+        mock_get_checkpoint.return_value = {'last_processed_log': 'test.xml'}
+        mock_list_logs.return_value = []
+        
+        result = index.lambda_handler({}, None)
+        
+        assert result['statusCode'] == 200
+        assert result['logs_processed'] == 0
+
+
+class TestUtilityFunctions:
+    """Test utility functions."""
+    
+    def test_extract_filename(self):
+        """Test extracting filename from S3 key."""
+        assert index.extract_filename('audit/test.xml') == 'test.xml'
+        assert index.extract_filename('audit/subdir/test.xml') == 'subdir/test.xml'

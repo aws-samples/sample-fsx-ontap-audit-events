@@ -8,6 +8,7 @@ from aws_cdk import (
     aws_lambda as lambda_,
     aws_events as events,
     aws_events_targets as targets,
+    aws_lambda_event_sources as lambda_event_sources,
     aws_iam as iam,
 )
 from constructs import Construct
@@ -28,9 +29,15 @@ class FsxAuditStack(Stack):
         self,
         scope: Construct,
         construct_id: str,
+        audit_s3_access_point_name: str = None,
         audit_s3_access_point_alias: str = None,
+        file_s3_access_point_name: str = None,
         file_s3_access_point_alias: str = None,
-        audit_prefix: str = "audit/",
+        output_s3_access_point_name: str = None,
+        output_s3_access_point_alias: str = None,
+        lambda_path: str = "../lambda",
+        layers_path: str = "../layers",
+        audit_prefix: str = "",
         **kwargs
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -67,6 +74,23 @@ class FsxAuditStack(Stack):
             ),
         )
 
+        # Lambda layers for dependencies
+        evtx_layer = lambda_.LayerVersion(
+            self,
+            "EvtxLayer",
+            code=lambda_.Code.from_asset(f"{layers_path}/evtx"),
+            compatible_runtimes=[lambda_.Runtime.PYTHON_3_12],
+            description="python-evtx library for EVTX parsing",
+        )
+        
+        pillow_layer = lambda_.LayerVersion(
+            self,
+            "PillowLayer",
+            code=lambda_.Code.from_asset(f"{layers_path}/pillow"),
+            compatible_runtimes=[lambda_.Runtime.PYTHON_3_12],
+            description="Pillow library for image processing",
+        )
+
         # Placeholder Lambda functions (will be implemented in later tasks)
         # Audit Log Processor Lambda
         audit_processor = lambda_.Function(
@@ -74,9 +98,10 @@ class FsxAuditStack(Stack):
             "AuditLogProcessor",
             runtime=lambda_.Runtime.PYTHON_3_12,
             handler="index.lambda_handler",
-            code=lambda_.Code.from_asset("lambda/audit_processor"),
+            code=lambda_.Code.from_asset(f"{lambda_path}/audit_processor"),
             timeout=Duration.seconds(60),
             memory_size=256,
+            layers=[evtx_layer],
             environment={
                 "BUCKET": audit_s3_access_point_alias or "",
                 "AUDIT_PREFIX": audit_prefix,
@@ -92,11 +117,13 @@ class FsxAuditStack(Stack):
             "FileProcessor",
             runtime=lambda_.Runtime.PYTHON_3_12,
             handler="index.lambda_handler",
-            code=lambda_.Code.from_asset("lambda/file_processor"),
+            code=lambda_.Code.from_asset(f"{lambda_path}/file_processor"),
             timeout=Duration.seconds(300),
             memory_size=1024,
+            layers=[pillow_layer],
             environment={
                 "S3_ACCESS_POINT_ALIAS": file_s3_access_point_alias or "",
+                "OUTPUT_S3_ACCESS_POINT_ALIAS": output_s3_access_point_alias or file_s3_access_point_alias or "",
             },
         )
 
@@ -114,12 +141,13 @@ class FsxAuditStack(Stack):
         queue.grant_send_messages(audit_processor)
         
         # Grant S3 permissions for audit log access
+        # Note: For FSx ONTAP S3 Access Points, use access point name in ARN, alias in API calls
         audit_processor.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["s3:GetObject", "s3:ListBucket"],
                 resources=[
-                    f"arn:aws:s3:::{audit_s3_access_point_alias or '*'}",
-                    f"arn:aws:s3:::{audit_s3_access_point_alias or '*'}/*",
+                    f"arn:aws:s3:{self.region}:{self.account}:accesspoint/{audit_s3_access_point_name or '*'}",
+                    f"arn:aws:s3:{self.region}:{self.account}:accesspoint/{audit_s3_access_point_name or '*'}/object/*",
                 ],
                 effect=iam.Effect.ALLOW,
             )
@@ -128,9 +156,18 @@ class FsxAuditStack(Stack):
         # Grant IAM permissions to file processor Lambda
         file_processor.add_to_role_policy(
             iam.PolicyStatement(
-                actions=["s3:GetObject", "s3:PutObject"],
+                actions=["s3:GetObject"],
                 resources=[
-                    f"arn:aws:s3:::{file_s3_access_point_alias or '*'}/*",
+                    f"arn:aws:s3:{self.region}:{self.account}:accesspoint/{file_s3_access_point_name or '*'}/object/*",
+                ],
+                effect=iam.Effect.ALLOW,
+            )
+        )
+        file_processor.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:PutObject"],
+                resources=[
+                    f"arn:aws:s3:{self.region}:{self.account}:accesspoint/{output_s3_access_point_name or file_s3_access_point_name or '*'}/object/*",
                 ],
                 effect=iam.Effect.ALLOW,
             )
@@ -138,6 +175,14 @@ class FsxAuditStack(Stack):
 
         # Grant SQS permissions to file processor (will be configured with SQS trigger in later tasks)
         queue.grant_consume_messages(file_processor)
+        
+        # Add SQS trigger to file processor
+        file_processor.add_event_source(
+            lambda_event_sources.SqsEventSource(
+                queue,
+                batch_size=10,
+            )
+        )
 
         # Stack outputs
         CfnOutput(
