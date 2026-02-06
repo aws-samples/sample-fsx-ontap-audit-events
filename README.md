@@ -7,6 +7,7 @@ Event-driven serverless file processing for FSx ONTAP using audit logs.
 This project implements an event-driven architecture for processing file operations on FSx ONTAP file systems accessed via NFS/SMB protocols. Since NFS/SMB writes don't trigger S3 Event Notifications, the solution uses ONTAP's native audit logging capability combined with serverless AWS components.
 
 **Key Features:**
+
 - ✅ Detects file creation events from ONTAP audit logs (XML/EVTX formats)
 - ✅ Checkpoint-based processing for efficiency (99% reduction in S3 API calls)
 - ✅ Automatic thumbnail generation for uploaded images
@@ -76,6 +77,7 @@ audits/
 3. **Python 3.12+** and **uv** package manager
 
 4. **AWS CDK CLI**:
+
    ```bash
    npm install -g aws-cdk
    ```
@@ -136,6 +138,7 @@ vserver audit show -vserver <svm-name>
 ```
 
 **Configuration Options:**
+
 - **Format**: `xml` (recommended) or `evtx`
 - **Rotation**: Every minute for lowest latency
 - **Guarantee**: `true` for synchronous logging (no missed events)
@@ -143,6 +146,7 @@ vserver audit show -vserver <svm-name>
 ## Environment Variables
 
 ### Audit Processor Lambda
+
 | Variable | Description |
 |----------|-------------|
 | `BUCKET` | S3 Access Point alias for audit logs |
@@ -152,6 +156,7 @@ vserver audit show -vserver <svm-name>
 | `MAX_KEYS` | Maximum logs to process per run (default: 100) |
 
 ### File Processor Lambda
+
 | Variable | Description |
 |----------|-------------|
 | `S3_ACCESS_POINT_ALIAS` | S3 Access Point alias for reading files |
@@ -160,12 +165,14 @@ vserver audit show -vserver <svm-name>
 ## Testing
 
 ### Unit Tests
+
 ```bash
 source .venv/bin/activate
 pytest tests/ -v
 ```
 
 ### Integration Test
+
 ```bash
 python tests/integration_test.py \
   --audit-alias <audit-ap-alias> \
@@ -194,10 +201,12 @@ cdk destroy
 ## Monitoring
 
 ### CloudWatch Logs
+
 - **Audit Processor**: `/aws/lambda/FsxAuditStack-AuditLogProcessor-*`
 - **File Processor**: `/aws/lambda/FsxAuditStack-FileProcessor-*`
 
 ### Debugging Commands
+
 ```bash
 # View Lambda logs
 aws logs tail /aws/lambda/FsxAuditStack-AuditLogProcessor-* --follow
@@ -216,22 +225,26 @@ aws dynamodb get-item \
 ## Troubleshooting
 
 ### No logs being processed
+
 - Check ONTAP audit is enabled: `vserver audit show`
 - Verify audit logs are being written to FSx volume
 - Check Lambda has S3 permissions
 - Verify DynamoDB checkpoint is not stuck
 
 ### Thumbnail not generated
+
 - Check file is a supported image format (JPEG, PNG, GIF, WebP, TIFF, BMP)
 - Verify file exists in FSx volume
 - Check Lambda logs for errors
 
 ### SQS messages in DLQ
+
 - Check Lambda logs for processing errors
 - Verify S3 Access Point is accessible
 - Check IAM permissions
 
 ### Feedback loop (thumbnails triggering new events)
+
 - Use separate `output_s3_access_point_alias` pointing to a non-audited volume
 
 ## Key Design Decisions
@@ -249,3 +262,11 @@ aws dynamodb get-item \
 - [FSx ONTAP S3 Access Points](https://docs.aws.amazon.com/fsx/latest/ONTAPGuide/accessing-data-via-s3-access-points.html)
 - [ONTAP Audit Configuration](https://docs.aws.amazon.com/fsx/latest/ONTAPGuide/file-access-auditing.html)
 - [AWS Lambda Best Practices](https://docs.aws.amazon.com/lambda/latest/dg/best-practices.html)
+
+## Security
+
+See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
+
+## License
+
+This library is licensed under the MIT-0 License. See the LICENSE file.
