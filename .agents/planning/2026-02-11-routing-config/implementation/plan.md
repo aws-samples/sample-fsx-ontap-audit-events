@@ -8,7 +8,7 @@
 - [x] Step 4: Update CDK to load and pass routing config
 - [x] Step 5: Add dynamic resource creation in CDK
 - [x] Step 6: Add IAM permissions for all destination types
-- [ ] Step 7: Update tests and documentation
+- [x] Step 7: Update tests and documentation
 
 ---
 

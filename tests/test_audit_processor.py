@@ -275,6 +275,7 @@ class TestEventBridgePublishing:
     
     @patch('index.events_client')
     @patch('index.EVENT_BUS_NAME', 'test-bus')
+    @patch('index._routes', {})
     def test_publish_events_single_batch(self, mock_events):
         """Test publishing single batch to EventBridge."""
         events = [
@@ -293,6 +294,7 @@ class TestEventBridgePublishing:
     
     @patch('index.events_client')
     @patch('index.EVENT_BUS_NAME', 'test-bus')
+    @patch('index._routes', {})
     def test_publish_events_multiple_batches(self, mock_events):
         """Test publishing multiple batches to EventBridge."""
         events = [{'file_path': f'/data/test{i}.jpg', 'operation': 'create'} for i in range(25)]
@@ -308,6 +310,55 @@ class TestEventBridgePublishing:
         index.publish_events([])
         
         mock_events.put_events.assert_not_called()
+
+
+class TestRoutingDestinations:
+    """Test routing to different destinations."""
+
+    @patch('index.sqs_client')
+    def test_send_to_sqs(self, mock_sqs):
+        """Test sending events to SQS."""
+        events = [{'file_path': '/test.jpg'}]
+        index._send_to_sqs('https://sqs.us-east-1.amazonaws.com/123/queue', events)
+        mock_sqs.send_message_batch.assert_called_once()
+
+    @patch('index.sns_client')
+    def test_send_to_sns(self, mock_sns):
+        """Test sending events to SNS."""
+        events = [{'file_path': '/test.jpg'}]
+        index._send_to_sns('arn:aws:sns:us-east-1:123:topic', events)
+        mock_sns.publish.assert_called_once()
+
+    @patch('index.logs_client')
+    def test_send_to_cloudwatch_logs(self, mock_logs):
+        """Test sending events to CloudWatch Logs."""
+        mock_logs.exceptions.ResourceAlreadyExistsException = Exception
+        events = [{'file_path': '/test.jpg'}]
+        index._send_to_cloudwatch_logs('/fsx/test', events)
+        mock_logs.create_log_stream.assert_called_once()
+        mock_logs.put_log_events.assert_called_once()
+
+    @patch('index.sqs_client')
+    @patch('index.events_client')
+    @patch('index.EVENT_BUS_NAME', 'test-bus')
+    def test_publish_events_with_routing(self, mock_events, mock_sqs):
+        """Test routing events to configured destination."""
+        original = index._routes.copy()
+        index._routes[('svm1', 'unix')] = {
+            'destination_type': 'sqs',
+            'destination_arn': 'https://sqs.us-east-1.amazonaws.com/123/queue'
+        }
+        
+        events = [
+            {'svm_name': 'svm1', 'junction_path': 'unix', 'file_path': '/test.jpg'},
+            {'svm_name': 'svm2', 'junction_path': 'other', 'file_path': '/test2.jpg'}
+        ]
+        
+        index.publish_events(events)
+        
+        mock_sqs.send_message_batch.assert_called_once()  # Routed event
+        mock_events.put_events.assert_called_once()  # Default event
+        index._routes = original
 
 
 class TestLambdaHandler:

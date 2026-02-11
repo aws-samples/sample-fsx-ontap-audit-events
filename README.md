@@ -118,6 +118,31 @@ cdk deploy \
   -c output_s3_access_point_alias=output-ap-xxxxx-s3alias
 ```
 
+### Optional: Event Routing Configuration
+
+Route audit events to different destinations based on SVM name and junction path:
+
+```bash
+# Create routing config file
+cat > routes.json << 'EOF'
+{
+  "routes": [
+    {"svm_name": "svm1", "junction_path": "unix", "destination_type": "sqs"},
+    {"svm_name": "svm2", "junction_path": "ntfs", "destination_type": "sns", "destination_arn": "arn:aws:sns:us-east-1:123456789:my-topic"},
+    {"svm_name": "svm3", "junction_path": "data", "destination_type": "cloudwatch_logs"}
+  ]
+}
+EOF
+
+# Deploy with routing
+cdk deploy -c routing_config_path=./routes.json
+```
+
+**Routing Options:**
+- `destination_type`: `sqs`, `sns`, `cloudwatch_logs`, or `eventbridge`
+- `destination_arn`: Optional - CDK creates resource if not provided
+- Events not matching any route go to the default EventBridge bus
+
 ## ONTAP Audit Configuration
 
 SSH to FSx ONTAP management endpoint and configure auditing:
@@ -152,7 +177,8 @@ vserver audit show -vserver <svm-name>
 | `BUCKET` | S3 Access Point alias for audit logs |
 | `AUDIT_PREFIX` | Path prefix for audit logs (default: empty) |
 | `TABLE_NAME` | DynamoDB table name for checkpoint |
-| `QUEUE_URL` | SQS queue URL for file events |
+| `EVENT_BUS_NAME` | EventBridge bus name for file events |
+| `ROUTING_CONFIG` | JSON routing config (optional) |
 | `MAX_KEYS` | Maximum logs to process per run (default: 100) |
 
 ### File Processor Lambda
