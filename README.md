@@ -110,11 +110,8 @@ cd infra
 source ../.venv/bin/activate
 
 cdk deploy \
-  -c audit_s3_access_point_name=audit-ap \
   -c audit_s3_access_point_alias=audit-ap-xxxxx-s3alias \
-  -c file_s3_access_point_name=data-ap \
   -c file_s3_access_point_alias=data-ap-xxxxx-s3alias \
-  -c output_s3_access_point_name=output-ap \
   -c output_s3_access_point_alias=output-ap-xxxxx-s3alias
 ```
 

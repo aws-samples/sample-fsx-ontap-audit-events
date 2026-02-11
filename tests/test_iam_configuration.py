@@ -22,9 +22,7 @@ def create_stack(deploy_example=False):
     return FsxAuditStack(
         app,
         "TestStack",
-        audit_s3_access_point_name="test-audit-ap",
         audit_s3_access_point_alias="test-audit-alias",
-        file_s3_access_point_name="test-file-ap",
         file_s3_access_point_alias="test-file-alias",
         lambda_path=LAMBDA_PATH,
         layers_path=LAYERS_PATH,

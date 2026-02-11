@@ -39,11 +39,8 @@ class FsxAuditStack(Stack):
         self,
         scope: Construct,
         construct_id: str,
-        audit_s3_access_point_name: str = None,
         audit_s3_access_point_alias: str = None,
-        file_s3_access_point_name: str = None,
         file_s3_access_point_alias: str = None,
-        output_s3_access_point_name: str = None,
         output_s3_access_point_alias: str = None,
         lambda_path: str = "../lambda",
         layers_path: str = "../layers",
@@ -165,13 +162,13 @@ class FsxAuditStack(Stack):
         state_table.grant_read_write_data(audit_processor)
         event_bus.grant_put_events_to(audit_processor)
 
-        # Grant S3 permissions for audit log access
+        # Grant S3 permissions for audit log access (use wildcard for access points)
         audit_processor.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["s3:GetObject", "s3:ListBucket"],
                 resources=[
-                    f"arn:aws:s3:{self.region}:{self.account}:accesspoint/{audit_s3_access_point_name or '*'}",
-                    f"arn:aws:s3:{self.region}:{self.account}:accesspoint/{audit_s3_access_point_name or '*'}/object/*",
+                    f"arn:aws:s3:{self.region}:{self.account}:accesspoint/*",
+                    f"arn:aws:s3:{self.region}:{self.account}:accesspoint/*/object/*",
                 ],
                 effect=iam.Effect.ALLOW,
             )
@@ -262,12 +259,12 @@ class FsxAuditStack(Stack):
                 },
             )
 
-            # Grant S3 permissions to file processor
+            # Grant S3 permissions to file processor (use wildcard for access points)
             file_processor.add_to_role_policy(
                 iam.PolicyStatement(
                     actions=["s3:GetObject"],
                     resources=[
-                        f"arn:aws:s3:{self.region}:{self.account}:accesspoint/{file_s3_access_point_name or '*'}/object/*",
+                        f"arn:aws:s3:{self.region}:{self.account}:accesspoint/*/object/*",
                     ],
                     effect=iam.Effect.ALLOW,
                 )
@@ -276,7 +273,7 @@ class FsxAuditStack(Stack):
                 iam.PolicyStatement(
                     actions=["s3:PutObject"],
                     resources=[
-                        f"arn:aws:s3:{self.region}:{self.account}:accesspoint/{output_s3_access_point_name or file_s3_access_point_name or '*'}/object/*",
+                        f"arn:aws:s3:{self.region}:{self.account}:accesspoint/*/object/*",
                     ],
                     effect=iam.Effect.ALLOW,
                 )

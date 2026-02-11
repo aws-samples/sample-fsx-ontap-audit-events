@@ -14,12 +14,9 @@ app = cdk.App()
 lambda_path = app.node.try_get_context("lambda_path") or "../lambda"
 layers_path = app.node.try_get_context("layers_path") or "../layers"
 
-# Get S3 Access Point names and aliases from context
-audit_name = app.node.try_get_context("audit_s3_access_point_name")
+# Get S3 Access Point aliases from context
 audit_alias = app.node.try_get_context("audit_s3_access_point_alias")
-file_name = app.node.try_get_context("file_s3_access_point_name")
 file_alias = app.node.try_get_context("file_s3_access_point_alias")
-output_name = app.node.try_get_context("output_s3_access_point_name")
 output_alias = app.node.try_get_context("output_s3_access_point_alias")
 
 # Optional: deploy thumbnail generation example
@@ -31,11 +28,8 @@ routing_config_path = app.node.try_get_context("routing_config_path")
 FsxAuditStack(
     app,
     "FsxAuditStack",
-    audit_s3_access_point_name=audit_name,
     audit_s3_access_point_alias=audit_alias,
-    file_s3_access_point_name=file_name,
     file_s3_access_point_alias=file_alias,
-    output_s3_access_point_name=output_name,
     output_s3_access_point_alias=output_alias,
     lambda_path=lambda_path,
     layers_path=layers_path,
