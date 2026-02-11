@@ -5,6 +5,8 @@ from aws_cdk import (
     RemovalPolicy,
     aws_dynamodb as dynamodb,
     aws_sqs as sqs,
+    aws_sns as sns,
+    aws_logs as logs,
     aws_events as events,
     aws_lambda as lambda_,
     aws_lambda_destinations as destinations,
@@ -13,6 +15,8 @@ from aws_cdk import (
     aws_iam as iam,
 )
 from constructs import Construct
+import json
+import os
 
 
 class FsxAuditStack(Stack):
@@ -45,9 +49,16 @@ class FsxAuditStack(Stack):
         layers_path: str = "../layers",
         audit_prefix: str = "",
         deploy_example: bool = False,
+        routing_config_path: str = None,
         **kwargs
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
+
+        # Load routing config if provided
+        routing_config = None
+        if routing_config_path and os.path.exists(routing_config_path):
+            with open(routing_config_path) as f:
+                routing_config = json.load(f)
 
         # ============================================================
         # CORE RESOURCES (always deployed)
@@ -80,6 +91,37 @@ class FsxAuditStack(Stack):
             event_bus_name=f"{construct_id}-file-events",
         )
 
+        # ============================================================
+        # ROUTING RESOURCES (created based on routing_config)
+        # ============================================================
+        
+        if routing_config:
+            for route in routing_config.get('routes', []):
+                svm = route.get('svm_name', '')
+                jp = route.get('junction_path', '')
+                dest_type = route.get('destination_type', '')
+                
+                if not route.get('destination_arn') and svm and jp and dest_type:
+                    resource_name = f"{svm}-{jp}".replace('_', '-').replace('/', '-')
+                    
+                    if dest_type == 'sqs':
+                        q = sqs.Queue(self, f"Route-{resource_name}-Queue",
+                            queue_name=f"{construct_id}-{svm}-{jp}-queue".replace('_', '-'),
+                            retention_period=Duration.days(4))
+                        route['destination_arn'] = q.queue_url
+                        
+                    elif dest_type == 'sns':
+                        t = sns.Topic(self, f"Route-{resource_name}-Topic",
+                            topic_name=f"{construct_id}-{svm}-{jp}-topic".replace('_', '-'))
+                        route['destination_arn'] = t.topic_arn
+                        
+                    elif dest_type == 'cloudwatch_logs':
+                        lg = logs.LogGroup(self, f"Route-{resource_name}-LogGroup",
+                            log_group_name=f"/fsx/{construct_id}/{svm}/{jp}",
+                            retention=logs.RetentionDays.ONE_MONTH,
+                            removal_policy=RemovalPolicy.DESTROY)
+                        route['destination_arn'] = lg.log_group_name
+
         # EVTX Lambda layer (required for audit processing)
         evtx_layer = lambda_.LayerVersion(
             self,
@@ -104,6 +146,7 @@ class FsxAuditStack(Stack):
                 "AUDIT_PREFIX": audit_prefix,
                 "TABLE_NAME": state_table.table_name,
                 "EVENT_BUS_NAME": event_bus.event_bus_name,
+                "ROUTING_CONFIG": json.dumps(routing_config) if routing_config else "",
                 "MAX_KEYS": "100",
                 "MAX_LOGS_PER_INVOCATION": "10",
             },
@@ -133,6 +176,30 @@ class FsxAuditStack(Stack):
                 effect=iam.Effect.ALLOW,
             )
         )
+
+        # Grant permissions for routing destinations
+        if routing_config:
+            audit_processor.add_to_role_policy(
+                iam.PolicyStatement(
+                    actions=["sqs:SendMessage", "sqs:SendMessageBatch"],
+                    resources=[f"arn:aws:sqs:{self.region}:{self.account}:*"],
+                    effect=iam.Effect.ALLOW,
+                )
+            )
+            audit_processor.add_to_role_policy(
+                iam.PolicyStatement(
+                    actions=["sns:Publish"],
+                    resources=[f"arn:aws:sns:{self.region}:{self.account}:*"],
+                    effect=iam.Effect.ALLOW,
+                )
+            )
+            audit_processor.add_to_role_policy(
+                iam.PolicyStatement(
+                    actions=["logs:CreateLogStream", "logs:PutLogEvents"],
+                    resources=[f"arn:aws:logs:{self.region}:{self.account}:log-group:/fsx/*"],
+                    effect=iam.Effect.ALLOW,
+                )
+            )
 
         # ============================================================
         # EXAMPLE RESOURCES (optional - thumbnail generation demo)

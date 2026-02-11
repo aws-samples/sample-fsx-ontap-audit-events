@@ -25,6 +25,9 @@ output_alias = app.node.try_get_context("output_s3_access_point_alias")
 # Optional: deploy thumbnail generation example
 deploy_example = app.node.try_get_context("deploy_example") or False
 
+# Optional: routing config file path
+routing_config_path = app.node.try_get_context("routing_config_path")
+
 FsxAuditStack(
     app,
     "FsxAuditStack",
@@ -37,6 +40,7 @@ FsxAuditStack(
     lambda_path=lambda_path,
     layers_path=layers_path,
     deploy_example=deploy_example,
+    routing_config_path=routing_config_path,
     # Uncomment to specify environment
     # env=cdk.Environment(account='486768734100', region='eu-west-1'),
 )

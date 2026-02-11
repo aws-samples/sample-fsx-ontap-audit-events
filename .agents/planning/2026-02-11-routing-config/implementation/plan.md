@@ -2,12 +2,12 @@
 
 ## Implementation Checklist
 
-- [ ] Step 1: Add routing config parsing to Lambda
-- [ ] Step 2: Implement destination send functions
-- [ ] Step 3: Modify publish_events with routing logic
-- [ ] Step 4: Update CDK to load and pass routing config
-- [ ] Step 5: Add dynamic resource creation in CDK
-- [ ] Step 6: Add IAM permissions for all destination types
+- [x] Step 1: Add routing config parsing to Lambda
+- [x] Step 2: Implement destination send functions
+- [x] Step 3: Modify publish_events with routing logic
+- [x] Step 4: Update CDK to load and pass routing config
+- [x] Step 5: Add dynamic resource creation in CDK
+- [x] Step 6: Add IAM permissions for all destination types
 - [ ] Step 7: Update tests and documentation
 
 ---

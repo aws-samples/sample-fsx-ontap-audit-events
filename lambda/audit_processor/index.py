@@ -17,6 +17,9 @@ from typing import List, Dict, Optional
 # Initialize AWS clients
 s3 = boto3.client('s3')
 events_client = boto3.client('events')
+sqs_client = boto3.client('sqs')
+sns_client = boto3.client('sns')
+logs_client = boto3.client('logs')
 dynamodb = boto3.resource('dynamodb')
 
 # Environment variables
@@ -446,24 +449,83 @@ def parse_computer(computer: str) -> tuple:
     return computer, ''
 
 
-def publish_events(event_list: List[Dict]):
-    """Publish events to EventBridge for downstream routing."""
-    if not event_list or not EVENT_BUS_NAME:
-        return
-    
-    # EventBridge accepts up to 10 entries per call
-    for i in range(0, len(event_list), 10):
-        batch = event_list[i:i+10]
+def _send_to_sqs(queue_url: str, events: List[Dict]):
+    """Send events to SQS queue in batches of 10."""
+    for i in range(0, len(events), 10):
+        batch = events[i:i+10]
+        entries = [{'Id': str(j), 'MessageBody': json.dumps(e)} for j, e in enumerate(batch)]
+        sqs_client.send_message_batch(QueueUrl=queue_url, Entries=entries)
+
+
+def _send_to_sns(topic_arn: str, events: List[Dict]):
+    """Send events to SNS topic."""
+    for event in events:
+        sns_client.publish(TopicArn=topic_arn, Message=json.dumps(event))
+
+
+def _send_to_cloudwatch_logs(log_group: str, events: List[Dict]):
+    """Send events to CloudWatch Logs."""
+    log_stream = datetime.utcnow().strftime('%Y/%m/%d')
+    try:
+        logs_client.create_log_stream(logGroupName=log_group, logStreamName=log_stream)
+    except logs_client.exceptions.ResourceAlreadyExistsException:
+        pass
+    log_events = [{'timestamp': int(datetime.utcnow().timestamp() * 1000), 'message': json.dumps(e)} for e in events]
+    logs_client.put_log_events(logGroupName=log_group, logStreamName=log_stream, logEvents=log_events)
+
+
+def _send_to_eventbridge(bus_name: str, events: List[Dict]):
+    """Send events to EventBridge bus."""
+    for i in range(0, len(events), 10):
+        batch = events[i:i+10]
         entries = [
-            {
-                'Source': 'fsx.ontap.audit',
-                'DetailType': 'File Event',
-                'Detail': json.dumps(event),
-                'EventBusName': EVENT_BUS_NAME
-            }
-            for event in batch
+            {'Source': 'fsx.ontap.audit', 'DetailType': 'File Event', 'Detail': json.dumps(e), 'EventBusName': bus_name}
+            for e in batch
         ]
         events_client.put_events(Entries=entries)
+
+
+def _send_to_destination(dest_type: str, dest_arn: str, events: List[Dict]):
+    """Route events to appropriate destination."""
+    if dest_type == 'sqs':
+        _send_to_sqs(dest_arn, events)
+    elif dest_type == 'sns':
+        _send_to_sns(dest_arn, events)
+    elif dest_type == 'cloudwatch_logs':
+        _send_to_cloudwatch_logs(dest_arn, events)
+    elif dest_type == 'eventbridge':
+        _send_to_eventbridge(dest_arn, events)
+
+
+def publish_events(event_list: List[Dict]):
+    """Publish events to configured destinations or default EventBridge."""
+    if not event_list:
+        return
+    
+    # Group events by destination
+    routed: Dict[tuple, List[Dict]] = {}
+    default_events = []
+    
+    for event in event_list:
+        route = get_route(event.get('svm_name', ''), event.get('junction_path', ''))
+        if route:
+            dest_key = (route['destination_type'], route.get('destination_arn', ''))
+            routed.setdefault(dest_key, []).append(event)
+        else:
+            default_events.append(event)
+    
+    # Send to configured destinations
+    for (dest_type, dest_arn), events in routed.items():
+        try:
+            _send_to_destination(dest_type, dest_arn, events)
+            print(f"Routed {len(events)} events to {dest_type}:{dest_arn}")
+        except Exception as e:
+            print(f"Error sending to {dest_type}:{dest_arn}: {e}")
+    
+    # Send unmatched to default EventBridge
+    if default_events and EVENT_BUS_NAME:
+        _send_to_eventbridge(EVENT_BUS_NAME, default_events)
+        print(f"Sent {len(default_events)} events to default EventBridge")
 
 
 def extract_filename(log_key: str) -> str:
