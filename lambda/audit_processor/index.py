@@ -26,6 +26,26 @@ TABLE_NAME = os.environ.get('TABLE_NAME', '')
 EVENT_BUS_NAME = os.environ.get('EVENT_BUS_NAME', '')
 MAX_KEYS = int(os.environ.get('MAX_KEYS', '100'))
 MAX_LOGS_PER_INVOCATION = int(os.environ.get('MAX_LOGS_PER_INVOCATION', '10'))
+ROUTING_CONFIG = os.environ.get('ROUTING_CONFIG', '')
+
+# Parse routing config on module load
+_routes: Dict[tuple, Dict] = {}
+
+if ROUTING_CONFIG:
+    try:
+        _config = json.loads(ROUTING_CONFIG)
+        for route in _config.get('routes', []):
+            if 'svm_name' in route and 'junction_path' in route:
+                key = (route['svm_name'], route['junction_path'])
+                _routes[key] = route
+        print(f"Loaded {len(_routes)} routing rules")
+    except json.JSONDecodeError as e:
+        print(f"Error parsing ROUTING_CONFIG: {e}")
+
+
+def get_route(svm_name: str, junction_path: str) -> Optional[Dict]:
+    """Look up route config by svm_name and junction_path."""
+    return _routes.get((svm_name, junction_path))
 
 # DynamoDB table
 if TABLE_NAME:

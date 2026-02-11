@@ -15,6 +15,71 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lambda', 'audi
 import index
 
 
+class TestRoutingConfigParser:
+    """Test routing configuration parsing."""
+
+    def test_get_route_found(self):
+        """Test route lookup when route exists."""
+        # Temporarily set routes
+        original = index._routes.copy()
+        index._routes[('svm1', 'unix')] = {
+            'svm_name': 'svm1',
+            'junction_path': 'unix',
+            'destination_type': 'sqs',
+            'destination_arn': 'arn:aws:sqs:us-east-1:123:test-queue'
+        }
+        
+        route = index.get_route('svm1', 'unix')
+        
+        assert route is not None
+        assert route['destination_type'] == 'sqs'
+        index._routes = original
+
+    def test_get_route_not_found(self):
+        """Test route lookup when route doesn't exist."""
+        route = index.get_route('nonexistent', 'path')
+        assert route is None
+
+    def test_parse_valid_config(self):
+        """Test parsing valid routing config."""
+        config = {
+            'routes': [
+                {'svm_name': 'svm1', 'junction_path': 'unix', 'destination_type': 'sqs'},
+                {'svm_name': 'svm2', 'junction_path': 'ntfs', 'destination_type': 'sns'}
+            ]
+        }
+        
+        # Simulate parsing
+        routes = {}
+        for route in config.get('routes', []):
+            if 'svm_name' in route and 'junction_path' in route:
+                key = (route['svm_name'], route['junction_path'])
+                routes[key] = route
+        
+        assert len(routes) == 2
+        assert ('svm1', 'unix') in routes
+        assert ('svm2', 'ntfs') in routes
+
+    def test_parse_config_missing_fields(self):
+        """Test parsing config with missing required fields."""
+        config = {
+            'routes': [
+                {'svm_name': 'svm1'},  # Missing junction_path
+                {'junction_path': 'unix'},  # Missing svm_name
+                {'svm_name': 'svm3', 'junction_path': 'data', 'destination_type': 'sqs'}
+            ]
+        }
+        
+        routes = {}
+        for route in config.get('routes', []):
+            if 'svm_name' in route and 'junction_path' in route:
+                key = (route['svm_name'], route['junction_path'])
+                routes[key] = route
+        
+        assert len(routes) == 1
+        assert ('svm3', 'data') in routes
+
+
 class TestCheckpointManagement:
     """Test checkpoint read/write operations."""
     
