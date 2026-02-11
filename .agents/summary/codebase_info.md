@@ -2,37 +2,43 @@
 
 ## Project Overview
 - **Name**: FSx ONTAP Audit Event Processing
-- **Type**: Event-driven serverless application
-- **Primary Language**: Python 3.12
-- **Infrastructure**: AWS CDK (Python)
-- **Runtime**: AWS Lambda
+- **Type**: AWS CDK Infrastructure + Lambda Functions
+- **Language**: Python 3.12
+- **Package Manager**: uv
+- **Total Files**: 511 (including dependencies)
+- **Core Files**: ~20 (excluding layers/dependencies)
+- **Lines of Code**: ~40,000 (including bundled libraries)
 
 ## Technology Stack
-| Category | Technology |
-|----------|------------|
-| Language | Python 3.12 |
-| Infrastructure as Code | AWS CDK v2 |
-| Compute | AWS Lambda |
-| Queue | Amazon SQS |
-| Database | Amazon DynamoDB |
-| Scheduler | Amazon EventBridge |
-| Storage | Amazon FSx for NetApp ONTAP |
-| Image Processing | Pillow |
-| Log Parsing | python-evtx, xml.etree |
+- **Infrastructure**: AWS CDK (Python)
+- **Runtime**: AWS Lambda (Python 3.12)
+- **Storage**: Amazon DynamoDB, Amazon S3 (via Access Points)
+- **Messaging**: Amazon SQS, Amazon SNS, Amazon EventBridge
+- **Logging**: Amazon CloudWatch Logs
+- **File System**: Amazon FSx for NetApp ONTAP
 
-## Dependencies
-### Runtime
-- boto3 (AWS SDK)
-- Pillow (image processing)
-- python-evtx (Windows Event Log parsing)
+## Repository Structure
+```
+audits/
+├── infra/                    # CDK infrastructure code
+├── lambda/                   # Lambda function source
+│   ├── audit_processor/      # Core audit log parser
+│   └── file_processor/       # Example thumbnail generator
+├── layers/                   # Lambda layers (bundled dependencies)
+│   ├── evtx/                 # Windows Event Log parser
+│   └── pillow/               # Image processing library
+├── scripts/                  # Build and setup scripts
+├── tests/                    # Unit and integration tests
+└── .agents/summary/          # AI assistant documentation
+```
 
-### Development
-- pytest
+## Supported Languages
+- Python (primary)
+- Shell scripts (build automation)
+
+## Key Dependencies
 - aws-cdk-lib
-- constructs
-
-## Repository Statistics
-- **Lambda Functions**: 2
-- **Lambda Layers**: 2
-- **Test Files**: 5
-- **Infrastructure Files**: 3
+- boto3
+- python-evtx (for EVTX parsing)
+- Pillow (for image processing - example use case)
+- pytest (development)

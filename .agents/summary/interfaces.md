@@ -1,95 +1,113 @@
-# Interfaces
+# Interfaces and APIs
 
-## S3 Access Points
+## Event Schema
 
-### Audit Access Point
-- **Usage**: Read audit logs from FSx ONTAP
-- **Operations**: `ListObjectsV2`, `GetObject`
-- **Path Pattern**: `audit_<svm>_D<timestamp>_<sequence>.xml`
-
-### File Access Point  
-- **Usage**: Read original files for processing
-- **Operations**: `GetObject`
-
-### Output Access Point
-- **Usage**: Write processed files (thumbnails)
-- **Operations**: `PutObject`
-- **Path Pattern**: `/thumbnails/<original_path>`
-
----
-
-## SQS Message Format
+### File Event (Published to EventBridge/SQS/SNS)
 
 ```json
 {
-  "file_path": "/path/to/file.png",
+  "file_path": "/images/photo.jpg",
+  "junction_path": "unix",
+  "svm_name": "fsxz_s01",
+  "filesystem_id": "FsxId0a60f59a70d0b2b4a",
   "operation": "create",
-  "timestamp": "2026-02-04T00:23:17.559509000Z",
-  "user": "unknown",
-  "user_ip": "10.0.0.1",
-  "source_log": "audit_fsxz_s01_D2026-02-04-T00-25-06_0000000000.xml",
+  "timestamp": "2026-02-09T20:32:20.359509000Z",
+  "user": "Administrator",
+  "user_ip": "172.31.2.69",
+  "source_log": "audit/audit_svm_log.0000000001.xml",
   "format": "xml",
-  "event_id": "4656"
+  "event_id": "4656",
+  "dedup_id": "a1b2c3d4e5f67890"
 }
 ```
 
----
+### Field Descriptions
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `file_path` | string | Full path to file within volume |
+| `junction_path` | string | Volume junction path (identifies volume) |
+| `svm_name` | string | Storage Virtual Machine name |
+| `filesystem_id` | string | FSx filesystem ID |
+| `operation` | string | Operation type (currently "create") |
+| `timestamp` | string | ISO 8601 timestamp from audit log |
+| `user` | string | Username who performed operation |
+| `user_ip` | string | Client IP address |
+| `source_log` | string | S3 key of source audit log |
+| `format` | string | Log format ("xml" or "evtx") |
+| `event_id` | string | Windows event ID (4656 = create) |
+| `dedup_id` | string | Deterministic ID for deduplication |
+
+## EventBridge Integration
+
+### Event Structure
+```json
+{
+  "Source": "fsx.ontap.audit",
+  "DetailType": "File Event",
+  "Detail": { /* File Event JSON */ },
+  "EventBusName": "FsxAuditStack-file-events"
+}
+```
+
+### Example EventBridge Rule (Route by Junction Path)
+```json
+{
+  "source": ["fsx.ontap.audit"],
+  "detail-type": ["File Event"],
+  "detail": {
+    "junction_path": ["unix"]
+  }
+}
+```
+
+### Example EventBridge Rule (Route by File Extension)
+```json
+{
+  "source": ["fsx.ontap.audit"],
+  "detail-type": ["File Event"],
+  "detail": {
+    "file_path": [{"suffix": ".jpg"}, {"suffix": ".png"}]
+  }
+}
+```
 
 ## DynamoDB Schema
 
 ### Checkpoint Table
+
 | Attribute | Type | Description |
 |-----------|------|-------------|
-| `pk` | String | Partition key, always "tracker" |
+| `pk` | String (PK) | Always "tracker" |
 | `last_processed_log` | String | Filename of last processed log |
-| `last_check_time` | String | ISO timestamp of last check |
-| `processed_count` | Number | Total logs processed |
+| `last_check_time` | String | ISO timestamp of last update |
+| `processed_count` | Number | Running total of logs processed |
 
----
+## S3 Access Point Interface
 
-## ONTAP Audit Log Format (XML)
+### Audit Log Access
+- **Bucket**: S3 Access Point alias (e.g., `audit-ap-abc123-s3alias`)
+- **Prefix**: Configurable (default: `audit/`)
+- **Operations**: `ListObjectsV2`, `GetObject`
 
-```xml
-<Events xmlns="http://www.netapp.com/schemas/ONTAP/2007/AuditLog">
-  <Event>
-    <System>
-      <EventID>4656</EventID>
-      <TimeCreated SystemTime="2026-02-04T00:23:17Z"/>
-    </System>
-    <EventData>
-      <Data Name="ObjectType">File</Data>
-      <Data Name="ObjectName">(unix);/path/to/file.png</Data>
-      <Data Name="SubjectIP" IPVersion="4">10.0.0.1</Data>
-    </EventData>
-  </Event>
-</Events>
-```
+### File Data Access
+- **Bucket**: S3 Access Point alias for data volume
+- **Operations**: `GetObject`, `PutObject`
 
-### Event IDs
-| ID | Description |
-|----|-------------|
-| 4656 | File/Directory Create |
+## CDK Stack Parameters
 
----
-
-## Lambda Event Formats
-
-### Audit Processor (EventBridge)
-```json
-{
-  "version": "0",
-  "source": "aws.events",
-  "detail-type": "Scheduled Event"
-}
-```
-
-### File Processor (SQS)
-```json
-{
-  "Records": [
-    {
-      "body": "{\"file_path\": \"/test.png\", \"operation\": \"create\", ...}"
-    }
-  ]
-}
+```python
+FsxAuditStack(
+    app,
+    "FsxAuditStack",
+    audit_s3_access_point_name="audit-ap",      # For IAM ARN
+    audit_s3_access_point_alias="audit-alias",  # For API calls
+    file_s3_access_point_name="file-ap",
+    file_s3_access_point_alias="file-alias",
+    output_s3_access_point_name="output-ap",
+    output_s3_access_point_alias="output-alias",
+    audit_prefix="svm1/audit/",
+    lambda_path="../lambda",
+    layers_path="../layers",
+)
 ```

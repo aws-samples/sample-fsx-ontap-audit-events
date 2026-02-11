@@ -131,6 +131,7 @@ class TestXMLParsing:
     <System>
       <EventID>4656</EventID>
       <TimeCreated SystemTime="2026-02-03T20:33:06.809779000Z"/>
+      <Computer>FsxId123/svm1</Computer>
     </System>
     <EventData>
       <Data Name="SubjectUserName">testuser</Data>
@@ -197,53 +198,65 @@ class TestXMLParsing:
 </EventData>'''
         
         event_data = ET.fromstring(xml_content)
+        ns = {}  # Empty namespace dict for non-namespaced XML
         
-        assert index.get_event_data_value(event_data, 'SubjectUserName') == 'testuser'
-        assert index.get_event_data_value(event_data, 'ObjectType') == 'File'
-        assert index.get_event_data_value(event_data, 'Missing', 'default') == 'default'
+        assert index.get_event_data_value(event_data, 'SubjectUserName', ns) == 'testuser'
+        assert index.get_event_data_value(event_data, 'ObjectType', ns) == 'File'
+        assert index.get_event_data_value(event_data, 'Missing', ns, 'default') == 'default'
 
 
-class TestSQSPublishing:
-    """Test SQS message publishing."""
+class TestEventBridgePublishing:
+    """Test EventBridge event publishing."""
     
-    @patch('index.sqs')
-    def test_send_to_sqs_batch_single(self, mock_sqs):
-        """Test sending single batch to SQS."""
+    @patch('index.events_client')
+    @patch('index.EVENT_BUS_NAME', 'test-bus')
+    def test_publish_events_single_batch(self, mock_events):
+        """Test publishing single batch to EventBridge."""
         events = [
             {'file_path': '/data/test1.jpg', 'operation': 'create'},
             {'file_path': '/data/test2.jpg', 'operation': 'create'}
         ]
         
-        index.send_to_sqs_batch(events)
+        index.publish_events(events)
         
-        mock_sqs.send_message_batch.assert_called_once()
-        call_args = mock_sqs.send_message_batch.call_args
+        mock_events.put_events.assert_called_once()
+        call_args = mock_events.put_events.call_args
         
         assert len(call_args[1]['Entries']) == 2
+        assert call_args[1]['Entries'][0]['Source'] == 'fsx.ontap.audit'
+        assert call_args[1]['Entries'][0]['DetailType'] == 'File Event'
     
-    @patch('index.sqs')
-    def test_send_to_sqs_batch_multiple(self, mock_sqs):
-        """Test sending multiple batches to SQS."""
+    @patch('index.events_client')
+    @patch('index.EVENT_BUS_NAME', 'test-bus')
+    def test_publish_events_multiple_batches(self, mock_events):
+        """Test publishing multiple batches to EventBridge."""
         events = [{'file_path': f'/data/test{i}.jpg', 'operation': 'create'} for i in range(25)]
         
-        index.send_to_sqs_batch(events)
+        index.publish_events(events)
         
         # Should be called 3 times (10 + 10 + 5)
-        assert mock_sqs.send_message_batch.call_count == 3
+        assert mock_events.put_events.call_count == 3
+    
+    @patch('index.events_client')
+    def test_publish_events_empty_list(self, mock_events):
+        """Test publishing empty list does nothing."""
+        index.publish_events([])
+        
+        mock_events.put_events.assert_not_called()
 
 
 class TestLambdaHandler:
     """Test main Lambda handler."""
     
     @patch('index.update_checkpoint')
-    @patch('index.send_to_sqs_batch')
+    @patch('index.publish_events')
     @patch('index.process_audit_log')
     @patch('index.list_new_logs')
     @patch('index.get_checkpoint')
     def test_lambda_handler_success(self, mock_get_checkpoint, mock_list_logs, 
-                                    mock_process_log, mock_send_sqs, mock_update_checkpoint):
+                                    mock_process_log, mock_publish, mock_update_checkpoint):
         """Test successful Lambda execution."""
-        mock_get_checkpoint.return_value = {'last_processed_log': ''}
+        mock_get_checkpoint.return_value = {'last_processed_log': 'previous.xml'}
         mock_list_logs.return_value = ['audit/test1.xml', 'audit/test2.xml']
         mock_process_log.return_value = [
             {'file_path': '/data/test.jpg', 'operation': 'create'}
@@ -254,6 +267,7 @@ class TestLambdaHandler:
         assert result['statusCode'] == 200
         assert result['logs_processed'] == 2
         assert result['events_found'] == 2
+        assert mock_publish.call_count == 2
     
     @patch('index.get_checkpoint')
     @patch('index.list_new_logs')

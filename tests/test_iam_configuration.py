@@ -1,26 +1,45 @@
 """
 Tests for IAM roles and permissions.
 """
+import sys
+import os
+
+# Add infra path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'infra'))
+
 import aws_cdk as cdk
 from aws_cdk.assertions import Template, Match
 from fsx_audit_stack import FsxAuditStack
 
+# Paths relative to tests directory
+LAMBDA_PATH = os.path.join(os.path.dirname(__file__), '..', 'lambda')
+LAYERS_PATH = os.path.join(os.path.dirname(__file__), '..', 'layers')
 
-class TestIAMConfiguration:
-    """Test that IAM roles and permissions are correctly configured."""
+
+def create_stack(deploy_example=False):
+    """Helper to create stack with correct paths."""
+    app = cdk.App()
+    return FsxAuditStack(
+        app,
+        "TestStack",
+        audit_s3_access_point_name="test-audit-ap",
+        audit_s3_access_point_alias="test-audit-alias",
+        file_s3_access_point_name="test-file-ap",
+        file_s3_access_point_alias="test-file-alias",
+        lambda_path=LAMBDA_PATH,
+        layers_path=LAYERS_PATH,
+        deploy_example=deploy_example,
+    )
+
+
+class TestCoreIAMConfiguration:
+    """Test IAM for core infrastructure."""
 
     def test_audit_processor_has_dynamodb_permissions(self):
         """Verify audit processor can read/write DynamoDB."""
-        app = cdk.App()
-        stack = FsxAuditStack(
-            app,
-            "TestStack",
-            audit_s3_access_point_alias="test-audit-alias",
-            file_s3_access_point_alias="test-file-alias",
-        )
+        stack = create_stack()
         template = Template.from_stack(stack)
 
-        # Check for DynamoDB permissions in IAM policy
         template.has_resource_properties(
             "AWS::IAM::Policy",
             {
@@ -28,39 +47,29 @@ class TestIAMConfiguration:
                     "Statement": Match.array_with([
                         Match.object_like({
                             "Action": Match.array_with([
-                                Match.string_like_regexp("dynamodb:.*"),
+                                "dynamodb:BatchGetItem",
+                                "dynamodb:GetItem",
                             ]),
-                            "Effect": "Allow",
+                            "Effect": "Allow"
                         })
                     ])
                 }
             }
         )
 
-    def test_audit_processor_has_sqs_permissions(self):
-        """Verify audit processor can send messages to SQS."""
-        app = cdk.App()
-        stack = FsxAuditStack(
-            app,
-            "TestStack",
-            audit_s3_access_point_alias="test-audit-alias",
-            file_s3_access_point_alias="test-file-alias",
-        )
+    def test_audit_processor_has_eventbridge_permissions(self):
+        """Verify audit processor can put events to EventBridge."""
+        stack = create_stack()
         template = Template.from_stack(stack)
 
-        # Check for SQS send permissions
         template.has_resource_properties(
             "AWS::IAM::Policy",
             {
                 "PolicyDocument": {
                     "Statement": Match.array_with([
                         Match.object_like({
-                            "Action": Match.array_with([
-                                "sqs:SendMessage",
-                                "sqs:GetQueueAttributes",
-                                "sqs:GetQueueUrl",
-                            ]),
-                            "Effect": "Allow",
+                            "Action": "events:PutEvents",
+                            "Effect": "Allow"
                         })
                     ])
                 }
@@ -68,73 +77,10 @@ class TestIAMConfiguration:
         )
 
     def test_audit_processor_has_s3_permissions(self):
-        """Verify audit processor can read from S3."""
-        app = cdk.App()
-        stack = FsxAuditStack(
-            app,
-            "TestStack",
-            audit_s3_access_point_alias="test-audit-alias",
-            file_s3_access_point_alias="test-file-alias",
-        )
+        """Verify audit processor can read from S3 access point."""
+        stack = create_stack()
         template = Template.from_stack(stack)
 
-        # Check for S3 read permissions
-        template.has_resource_properties(
-            "AWS::IAM::Policy",
-            {
-                "PolicyDocument": {
-                    "Statement": Match.array_with([
-                        Match.object_like({
-                            "Action": ["s3:GetObject", "s3:ListBucket"],
-                            "Effect": "Allow",
-                            "Resource": [
-                                "arn:aws:s3:::test-audit-alias",
-                                "arn:aws:s3:::test-audit-alias/*",
-                            ]
-                        })
-                    ])
-                }
-            }
-        )
-
-    def test_file_processor_has_s3_permissions(self):
-        """Verify file processor can read/write to S3."""
-        app = cdk.App()
-        stack = FsxAuditStack(
-            app,
-            "TestStack",
-            audit_s3_access_point_alias="test-audit-alias",
-            file_s3_access_point_alias="test-file-alias",
-        )
-        template = Template.from_stack(stack)
-
-        # Check for S3 read/write permissions
-        template.has_resource_properties(
-            "AWS::IAM::Policy",
-            {
-                "PolicyDocument": {
-                    "Statement": Match.array_with([
-                        Match.object_like({
-                            "Action": ["s3:GetObject", "s3:PutObject"],
-                            "Effect": "Allow",
-                        })
-                    ])
-                }
-            }
-        )
-
-    def test_file_processor_has_sqs_permissions(self):
-        """Verify file processor can consume messages from SQS."""
-        app = cdk.App()
-        stack = FsxAuditStack(
-            app,
-            "TestStack",
-            audit_s3_access_point_alias="test-audit-alias",
-            file_s3_access_point_alias="test-file-alias",
-        )
-        template = Template.from_stack(stack)
-
-        # Check for SQS consume permissions
         template.has_resource_properties(
             "AWS::IAM::Policy",
             {
@@ -142,13 +88,10 @@ class TestIAMConfiguration:
                     "Statement": Match.array_with([
                         Match.object_like({
                             "Action": Match.array_with([
-                                "sqs:ReceiveMessage",
-                                "sqs:ChangeMessageVisibility",
-                                "sqs:GetQueueUrl",
-                                "sqs:DeleteMessage",
-                                "sqs:GetQueueAttributes",
+                                "s3:GetObject",
+                                "s3:ListBucket"
                             ]),
-                            "Effect": "Allow",
+                            "Effect": "Allow"
                         })
                     ])
                 }
@@ -157,30 +100,18 @@ class TestIAMConfiguration:
 
     def test_iam_roles_created(self):
         """Verify IAM roles are created for Lambda functions."""
-        app = cdk.App()
-        stack = FsxAuditStack(
-            app,
-            "TestStack",
-            audit_s3_access_point_alias="test-audit-alias",
-            file_s3_access_point_alias="test-file-alias",
-        )
+        stack = create_stack()
         template = Template.from_stack(stack)
 
-        # Should have 2 IAM roles (one per Lambda)
-        template.resource_count_is("AWS::IAM::Role", 2)
+        # Should have at least 1 IAM role for audit processor
+        roles = template.find_resources("AWS::IAM::Role")
+        assert len(roles) >= 1
 
     def test_lambda_execution_role_trust_policy(self):
-        """Verify Lambda execution roles have correct trust policy."""
-        app = cdk.App()
-        stack = FsxAuditStack(
-            app,
-            "TestStack",
-            audit_s3_access_point_alias="test-audit-alias",
-            file_s3_access_point_alias="test-file-alias",
-        )
+        """Verify Lambda execution role has correct trust policy."""
+        stack = create_stack()
         template = Template.from_stack(stack)
 
-        # Check trust policy allows Lambda service
         template.has_resource_properties(
             "AWS::IAM::Role",
             {
@@ -194,6 +125,70 @@ class TestIAMConfiguration:
                             }
                         }
                     ]
+                }
+            }
+        )
+
+
+class TestExampleIAMConfiguration:
+    """Test IAM for example infrastructure."""
+
+    def test_file_processor_has_s3_read_permissions(self):
+        """Verify file processor can read from S3."""
+        stack = create_stack(deploy_example=True)
+        template = Template.from_stack(stack)
+
+        template.has_resource_properties(
+            "AWS::IAM::Policy",
+            {
+                "PolicyDocument": {
+                    "Statement": Match.array_with([
+                        Match.object_like({
+                            "Action": "s3:GetObject",
+                            "Effect": "Allow"
+                        })
+                    ])
+                }
+            }
+        )
+
+    def test_file_processor_has_s3_write_permissions(self):
+        """Verify file processor can write to S3."""
+        stack = create_stack(deploy_example=True)
+        template = Template.from_stack(stack)
+
+        template.has_resource_properties(
+            "AWS::IAM::Policy",
+            {
+                "PolicyDocument": {
+                    "Statement": Match.array_with([
+                        Match.object_like({
+                            "Action": "s3:PutObject",
+                            "Effect": "Allow"
+                        })
+                    ])
+                }
+            }
+        )
+
+    def test_file_processor_has_sqs_permissions(self):
+        """Verify file processor can consume from SQS."""
+        stack = create_stack(deploy_example=True)
+        template = Template.from_stack(stack)
+
+        template.has_resource_properties(
+            "AWS::IAM::Policy",
+            {
+                "PolicyDocument": {
+                    "Statement": Match.array_with([
+                        Match.object_like({
+                            "Action": Match.array_with([
+                                "sqs:ReceiveMessage",
+                                "sqs:DeleteMessage",
+                            ]),
+                            "Effect": "Allow"
+                        })
+                    ])
                 }
             }
         )

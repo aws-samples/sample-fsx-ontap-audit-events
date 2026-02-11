@@ -3,9 +3,11 @@ FSx ONTAP Audit Log Processor Lambda Function
 
 Processes ONTAP audit logs (XML/EVTX format) to extract file creation events.
 Uses checkpoint-based approach with DynamoDB for efficient processing.
+Publishes events to EventBridge for flexible downstream routing.
 """
 
 import boto3
+import hashlib
 import json
 import os
 import xml.etree.ElementTree as ET
@@ -14,15 +16,16 @@ from typing import List, Dict, Optional
 
 # Initialize AWS clients
 s3 = boto3.client('s3')
-sqs = boto3.client('sqs')
+events_client = boto3.client('events')
 dynamodb = boto3.resource('dynamodb')
 
 # Environment variables
 BUCKET = os.environ.get('BUCKET', '')
 AUDIT_PREFIX = os.environ.get('AUDIT_PREFIX', 'audit/')
 TABLE_NAME = os.environ.get('TABLE_NAME', '')
-QUEUE_URL = os.environ.get('QUEUE_URL', '')
+EVENT_BUS_NAME = os.environ.get('EVENT_BUS_NAME', '')
 MAX_KEYS = int(os.environ.get('MAX_KEYS', '100'))
+MAX_LOGS_PER_INVOCATION = int(os.environ.get('MAX_LOGS_PER_INVOCATION', '10'))
 
 # DynamoDB table
 if TABLE_NAME:
@@ -56,44 +59,42 @@ def lambda_handler(event, context):
     
     print(f"Last processed log: {last_processed}")
     
-    # Step 2: List new audit logs using StartAfter optimization
+    # Step 2: List new audit logs (limited per invocation)
     new_logs = list_new_logs(last_processed)
     
     if not new_logs:
         print("No new logs to process")
         return {'statusCode': 200, 'logs_processed': 0}
     
-    print(f"Found {len(new_logs)} new logs to process")
+    # Limit logs per invocation to reduce failure blast radius
+    logs_to_process = new_logs[:MAX_LOGS_PER_INVOCATION]
+    print(f"Processing {len(logs_to_process)} of {len(new_logs)} new logs")
     
-    # Step 3: Process each log
+    # Step 3: Process each log with per-log checkpointing
     events_processed = 0
-    last_log = last_processed
+    logs_completed = 0
     
-    for log_key in new_logs:
+    for log_key in logs_to_process:
         try:
-            events = process_audit_log(log_key)
-            if events:
-                send_to_sqs_batch(events)
-                events_processed += len(events)
+            log_events = process_audit_log(log_key)
+            if log_events:
+                publish_events(log_events)
+                events_processed += len(log_events)
             
-            # Update last processed log
-            last_log = extract_filename(log_key)
+            # Checkpoint after each successful log to ensure at-least-once
+            update_checkpoint(extract_filename(log_key), 1)
+            logs_completed += 1
             
         except Exception as e:
-            print(f"Error processing {log_key}: {e}")
-            # Continue processing other logs
-            continue
+            print(f"Error processing {log_key}, stopping: {e}")
+            break  # Stop on failure to avoid gaps
     
-    # Step 4: Update checkpoint
-    update_checkpoint(last_log, len(new_logs))
-    
-    print(f"Processed {len(new_logs)} logs, found {events_processed} file events")
+    print(f"Processed {logs_completed} logs, found {events_processed} file events")
     
     return {
         'statusCode': 200,
-        'logs_processed': len(new_logs),
-        'events_found': events_processed,
-        'last_processed': last_log
+        'logs_processed': logs_completed,
+        'events_found': events_processed
     }
 
 
@@ -294,15 +295,22 @@ def parse_xml_audit(content: bytes, log_key: str) -> List[Dict]:
             if object_type != 'File' or not object_name:
                 continue
             
-            # Parse object name: (unix);/path/to/file or (ntfs);/path/to/file
-            file_path = object_name.split(';', 1)[1] if ';' in object_name else object_name
+            # Parse object name: (junction_path);/path/to/file
+            junction_path, file_path = parse_object_name(object_name)
+            
+            # Extract SVM and filesystem from Computer element
+            computer = system.find('ns:Computer', ns) or system.find('Computer')
+            filesystem_id, svm_name = parse_computer(computer.text if computer is not None else '')
             
             # Extract timestamp
             time_created = system.find('ns:TimeCreated', ns) or system.find('TimeCreated')
             timestamp = time_created.get('SystemTime') if time_created is not None else ''
             
-            events.append({
+            event = {
                 'file_path': file_path,
+                'junction_path': junction_path,
+                'svm_name': svm_name,
+                'filesystem_id': filesystem_id,
                 'operation': 'create',
                 'timestamp': timestamp,
                 'user': get_event_data_value(event_data, 'SubjectUserName', ns, 'unknown'),
@@ -310,7 +318,9 @@ def parse_xml_audit(content: bytes, log_key: str) -> List[Dict]:
                 'source_log': log_key,
                 'format': 'xml',
                 'event_id': event_id
-            })
+            }
+            event['dedup_id'] = generate_event_id(file_path, timestamp, log_key)
+            events.append(event)
     
     except Exception as e:
         print(f"Error parsing XML: {e}")
@@ -346,19 +356,27 @@ def parse_evtx_audit(content: bytes, log_key: str) -> List[Dict]:
             if object_type != 'File' or not object_name:
                 continue
             
-            # Parse object name
-            file_path = object_name.split(';', 1)[1] if ';' in object_name else object_name
+            # Parse object name and computer
+            junction_path, file_path = parse_object_name(object_name)
+            computer = record.get('computer', '')
+            filesystem_id, svm_name = parse_computer(computer)
+            timestamp = record.get('timestamp', '')
             
-            events.append({
+            event = {
                 'file_path': file_path,
+                'junction_path': junction_path,
+                'svm_name': svm_name,
+                'filesystem_id': filesystem_id,
                 'operation': 'create',
-                'timestamp': record.get('timestamp', ''),
+                'timestamp': timestamp,
                 'user': event_data.get('SubjectUserName', 'unknown'),
                 'user_ip': event_data.get('SubjectIP', ''),
                 'source_log': log_key,
                 'format': 'evtx',
                 'event_id': event_id
-            })
+            }
+            event['dedup_id'] = generate_event_id(file_path, timestamp, log_key)
+            events.append(event)
     
     except Exception as e:
         print(f"Error parsing EVTX: {e}")
@@ -368,10 +386,11 @@ def parse_evtx_audit(content: bytes, log_key: str) -> List[Dict]:
 
 def get_event_data_value(event_data, name: str, ns: dict, default: str = '') -> str:
     """Extract value from EventData by Name attribute with namespace support."""
-    # Try with namespace first
-    for data in event_data.findall('ns:Data', ns):
-        if data.get('Name') == name:
-            return data.text or default
+    # Try with namespace first if namespace is defined
+    if ns and 'ns' in ns:
+        for data in event_data.findall('ns:Data', ns):
+            if data.get('Name') == name:
+                return data.text or default
     
     # Fallback without namespace
     for data in event_data.findall('Data'):
@@ -381,23 +400,50 @@ def get_event_data_value(event_data, name: str, ns: dict, default: str = '') -> 
     return default
 
 
-def send_to_sqs_batch(events: List[Dict]):
-    """Send events to SQS in batches of 10."""
-    for i in range(0, len(events), 10):
-        batch = events[i:i+10]
+def generate_event_id(file_path: str, timestamp: str, source_log: str) -> str:
+    """Generate deterministic event ID for deduplication."""
+    content = f"{file_path}|{timestamp}|{source_log}"
+    return hashlib.sha256(content.encode()).hexdigest()[:16]
+
+
+def parse_object_name(object_name: str) -> tuple:
+    """Parse ObjectName: (junction_path);/file/path -> (junction_path, file_path)"""
+    import re
+    match = re.match(r'\(([^)]+)\);(.+)', object_name)
+    if match:
+        return match.group(1), match.group(2)
+    # Fallback: no junction path
+    if ';' in object_name:
+        return '', object_name.split(';', 1)[1]
+    return '', object_name
+
+
+def parse_computer(computer: str) -> tuple:
+    """Parse Computer: FsxId.../svm_name -> (filesystem_id, svm_name)"""
+    if '/' in computer:
+        parts = computer.split('/', 1)
+        return parts[0], parts[1]
+    return computer, ''
+
+
+def publish_events(event_list: List[Dict]):
+    """Publish events to EventBridge for downstream routing."""
+    if not event_list or not EVENT_BUS_NAME:
+        return
+    
+    # EventBridge accepts up to 10 entries per call
+    for i in range(0, len(event_list), 10):
+        batch = event_list[i:i+10]
         entries = [
             {
-                'Id': str(j),
-                'MessageBody': json.dumps(event)
+                'Source': 'fsx.ontap.audit',
+                'DetailType': 'File Event',
+                'Detail': json.dumps(event),
+                'EventBusName': EVENT_BUS_NAME
             }
-            for j, event in enumerate(batch)
+            for event in batch
         ]
-        
-        try:
-            sqs.send_message_batch(QueueUrl=QUEUE_URL, Entries=entries)
-        except Exception as e:
-            print(f"Error sending batch to SQS: {e}")
-            raise
+        events_client.put_events(Entries=entries)
 
 
 def extract_filename(log_key: str) -> str:

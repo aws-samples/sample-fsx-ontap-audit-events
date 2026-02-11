@@ -1,26 +1,58 @@
-# Architecture
+# System Architecture
 
-## System Overview
+## High-Level Architecture
 
 ```mermaid
 graph TB
     subgraph "FSx ONTAP"
-        A[NFS/SMB Clients] --> B[Data Volume]
-        B --> C[Audit Logs]
+        NFS[NFS/SMB Clients]
+        AV[Audit Volume]
+        DV[Data Volumes]
     end
     
-    subgraph "AWS Serverless"
-        D[EventBridge<br/>1 min schedule] --> E[Audit Processor<br/>Lambda]
-        E --> F[DynamoDB<br/>Checkpoint]
-        E --> G[SQS Queue]
-        G --> H[File Processor<br/>Lambda]
-        H --> I[Output Volume]
+    subgraph "AWS Services"
+        S3AP[S3 Access Points]
+        EB[EventBridge Scheduler]
+        AP[Audit Processor Lambda]
+        DDB[(DynamoDB)]
+        BUS[EventBridge Bus]
+        SQS[SQS Queue]
+        SNS[SNS Topic]
+        CW[CloudWatch Logs]
+        FP[File Processor Lambda]
     end
     
-    C -->|S3 Access Point| E
-    B -->|S3 Access Point| H
-    H -->|S3 Access Point| I
+    NFS -->|writes| DV
+    DV -->|audit events| AV
+    AV -->|S3 protocol| S3AP
+    EB -->|triggers every 1 min| AP
+    S3AP -->|read logs| AP
+    AP -->|checkpoint| DDB
+    AP -->|publish events| BUS
+    AP -->|optional| SQS
+    AP -->|optional| SNS
+    AP -->|optional| CW
+    BUS -->|route by junction_path| SQS
+    SQS -->|triggers| FP
+    FP -->|read/write files| S3AP
 ```
+
+## Design Patterns
+
+### Event-Driven Architecture
+The system uses polling-based event detection since NFS/SMB writes don't trigger native S3 events. ONTAP audit logs serve as the event source.
+
+### Checkpoint Pattern
+DynamoDB stores processing state to ensure:
+- At-least-once delivery
+- Efficient resumption after failures
+- No reprocessing of old logs
+
+### Fan-Out Pattern
+EventBridge enables routing events to multiple destinations based on:
+- Junction path (volume identifier)
+- SVM name
+- File type or path patterns
 
 ## Data Flow
 
@@ -28,43 +60,26 @@ graph TB
 sequenceDiagram
     participant Client as NFS/SMB Client
     participant FSx as FSx ONTAP
-    participant EB as EventBridge
-    participant AP as Audit Processor
+    participant S3 as S3 Access Point
+    participant Lambda as Audit Processor
     participant DDB as DynamoDB
-    participant SQS as SQS Queue
-    participant FP as File Processor
-    
+    participant EB as EventBridge
+    participant Consumer as Event Consumers
+
     Client->>FSx: Write file
-    FSx->>FSx: Write audit log
-    EB->>AP: Trigger (every 1 min)
-    AP->>DDB: Get checkpoint
-    AP->>FSx: List new audit logs
-    AP->>FSx: Read audit log
-    AP->>AP: Parse XML/EVTX
-    AP->>SQS: Send file events
-    AP->>DDB: Update checkpoint
-    SQS->>FP: Trigger
-    FP->>FSx: Read original file
-    FP->>FP: Generate thumbnail
-    FP->>FSx: Write thumbnail
+    FSx->>FSx: Generate audit log
+    Note over Lambda: Triggered every 1 minute
+    Lambda->>DDB: Get checkpoint
+    Lambda->>S3: List new audit logs
+    Lambda->>S3: Download & parse logs
+    Lambda->>EB: Publish file events
+    Lambda->>DDB: Update checkpoint
+    EB->>Consumer: Route by junction_path
 ```
 
-## Design Patterns
+## Scalability Considerations
 
-### Checkpoint-based Processing
-- Uses DynamoDB to track last processed audit log
-- S3 `StartAfter` parameter for efficient listing
-- Avoids reprocessing on Lambda restarts
-
-### Active Log Detection
-- Skips `*_last.xml` files (currently being written)
-- Prevents reading incomplete audit data
-
-### First-Run Initialization
-- On first deployment, skips to latest log
-- Avoids processing historical backlog
-
-### Separate Input/Output Volumes
-- Reads from audited volume
-- Writes to separate output volume
-- Prevents feedback loop from generated files
+1. **Log Processing**: Limited to 10 logs per invocation to prevent timeouts
+2. **Event Batching**: SQS/EventBridge batch up to 10 events per API call
+3. **Checkpoint Granularity**: Per-log checkpointing for failure recovery
+4. **Multi-Volume Support**: Events include junction_path for routing

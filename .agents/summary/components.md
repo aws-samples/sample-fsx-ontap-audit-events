@@ -1,83 +1,91 @@
 # Components
 
-## Lambda Functions
+## Core Components
 
-### Audit Processor (`lambda/audit_processor/index.py`)
-**Purpose**: Parses ONTAP audit logs and extracts file creation events.
+### 1. Audit Processor Lambda
+**Location**: `lambda/audit_processor/index.py`
+
+**Purpose**: Parses FSx ONTAP audit logs and publishes file events to configured destinations.
 
 **Key Functions**:
 | Function | Description |
 |----------|-------------|
-| `lambda_handler` | Main entry point, orchestrates processing |
-| `get_checkpoint` | Reads last processed log from DynamoDB |
-| `update_checkpoint` | Saves processing progress |
-| `initialize_checkpoint_to_latest` | First-run: skips to latest log |
-| `list_new_logs` | Lists audit logs after checkpoint |
-| `identify_active_log` | Detects currently-written log file |
-| `process_audit_log` | Downloads and parses single log |
+| `lambda_handler` | Entry point, orchestrates processing flow |
+| `get_checkpoint` | Retrieves last processed log from DynamoDB |
+| `update_checkpoint` | Saves processing state after each log |
+| `list_new_logs` | Lists audit logs newer than checkpoint |
+| `process_audit_log` | Downloads and parses a single log file |
 | `parse_xml_audit` | Parses XML format audit logs |
-| `parse_evtx_audit` | Parses EVTX format audit logs |
-| `send_to_sqs_batch` | Sends events to SQS in batches of 10 |
+| `parse_evtx_audit` | Parses Windows EVTX format logs |
+| `publish_events` | Sends events to all configured destinations |
+| `parse_object_name` | Extracts junction_path and file_path |
+| `parse_computer` | Extracts filesystem_id and svm_name |
+| `generate_event_id` | Creates deterministic dedup ID |
 
 **Environment Variables**:
-- `BUCKET` - S3 Access Point alias for audit logs
-- `AUDIT_PREFIX` - Path prefix for audit logs
-- `TABLE_NAME` - DynamoDB table name
-- `QUEUE_URL` - SQS queue URL
-- `MAX_KEYS` - Max logs per invocation (default: 100)
+- `BUCKET`: S3 Access Point alias for audit logs
+- `AUDIT_PREFIX`: Path prefix within bucket
+- `TABLE_NAME`: DynamoDB table for checkpoints
+- `EVENT_BUS_NAME`: EventBridge bus name
+- `QUEUE_URL`: SQS queue URL (optional)
+- `SNS_TOPIC_ARN`: SNS topic ARN (optional)
+- `LOG_GROUP_NAME`: CloudWatch log group (optional)
+- `MAX_LOGS_PER_INVOCATION`: Batch size limit (default: 10)
 
----
+### 2. File Processor Lambda (Example)
+**Location**: `lambda/file_processor/index.py`
 
-### File Processor (`lambda/file_processor/index.py`)
-**Purpose**: Generates thumbnails for image files.
+**Purpose**: Example consumer that generates thumbnails for image files.
 
 **Key Functions**:
 | Function | Description |
 |----------|-------------|
 | `lambda_handler` | Processes SQS batch of file events |
 | `process_file_event` | Handles single file event |
-| `generate_thumbnail` | Creates 200x200 JPEG thumbnail |
+| `generate_thumbnail` | Creates thumbnail using Pillow |
+| `extract_metadata` | Extracts image metadata |
 
-**Environment Variables**:
-- `S3_ACCESS_POINT_ALIAS` - Input volume access point
-- `OUTPUT_S3_ACCESS_POINT_ALIAS` - Output volume access point
+**Note**: This is an optional example deployment demonstrating how to consume events.
 
-**Supported Formats**: `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp`, `.bmp`, `.tiff`, `.tif`
+### 3. CDK Infrastructure Stack
+**Location**: `infra/fsx_audit_stack.py`
 
----
+**Purpose**: Defines all AWS resources using CDK.
+
+**Resources Created**:
+- DynamoDB table (checkpoint storage)
+- SQS queues (main + DLQ)
+- SNS topic
+- EventBridge event bus
+- CloudWatch log group
+- Lambda functions with layers
+- EventBridge schedule rule
+- IAM roles and policies
 
 ## Lambda Layers
 
-### EVTX Layer (`layers/evtx/`)
-- **Package**: python-evtx
-- **Purpose**: Parse Windows Event Log (EVTX) format
+### EVTX Layer
+**Location**: `layers/evtx/`
+- Contains `python-evtx` library for parsing Windows Event Log format
+- Required for EVTX audit log support
 
-### Pillow Layer (`layers/pillow/`)
-- **Package**: Pillow
-- **Purpose**: Image processing and thumbnail generation
+### Pillow Layer
+**Location**: `layers/pillow/`
+- Contains Pillow image processing library
+- Only needed for file_processor example
 
----
+## Supporting Components
 
-## Infrastructure (`infra/fsx_audit_stack.py`)
+### Build Scripts
+**Location**: `scripts/`
+- `build_evtx_layer.sh`: Builds EVTX Lambda layer
+- `build_pillow_layer.sh`: Builds Pillow Lambda layer
+- `activate.sh`: Activates Python virtual environment
 
-### Resources Created
-| Resource | Type | Purpose |
-|----------|------|---------|
-| AuditLogStateTable | DynamoDB Table | Checkpoint storage |
-| FileEventsQueue | SQS Queue | Event buffering |
-| FileEventsDLQ | SQS Queue | Dead letter queue |
-| AuditLogProcessor | Lambda Function | Audit parsing |
-| FileProcessor | Lambda Function | Thumbnail generation |
-| AuditProcessorSchedule | EventBridge Rule | 1-minute trigger |
-| EvtxLayer | Lambda Layer | EVTX parsing |
-| PillowLayer | Lambda Layer | Image processing |
-
-### CDK Context Parameters
-| Parameter | Description |
-|-----------|-------------|
-| `audit_s3_access_point_name` | Audit AP name (for IAM) |
-| `audit_s3_access_point_alias` | Audit AP alias (for API calls) |
-| `file_s3_access_point_name` | File AP name (for IAM) |
-| `file_s3_access_point_alias` | File AP alias (for API calls) |
-| `output_s3_access_point_name` | Output AP name (for IAM) |
-| `output_s3_access_point_alias` | Output AP alias (for API calls) |
+### Test Suite
+**Location**: `tests/`
+- `test_audit_processor.py`: Unit tests for audit parsing
+- `test_file_processor.py`: Unit tests for thumbnail generation
+- `test_infrastructure_stack.py`: CDK snapshot tests
+- `test_iam_configuration.py`: IAM policy tests
+- `integration_test.py`: End-to-end integration tests

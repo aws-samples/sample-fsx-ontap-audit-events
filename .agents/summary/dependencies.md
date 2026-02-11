@@ -2,63 +2,64 @@
 
 ## Runtime Dependencies
 
-### Audit Processor Lambda
+### Core (audit_processor)
 | Package | Version | Purpose |
 |---------|---------|---------|
-| boto3 | (bundled) | AWS SDK |
-| python-evtx | 0.8.1 | EVTX log parsing |
+| boto3 | (Lambda runtime) | AWS SDK for S3, DynamoDB, SQS, SNS, EventBridge, CloudWatch |
+| python-evtx | bundled in layer | Parse Windows Event Log (EVTX) format |
 
-### File Processor Lambda
+### Example (file_processor)
 | Package | Version | Purpose |
 |---------|---------|---------|
-| boto3 | (bundled) | AWS SDK |
-| Pillow | 12.1.0 | Image processing |
-
----
+| boto3 | (Lambda runtime) | AWS SDK for S3 |
+| Pillow | bundled in layer | Image processing and thumbnail generation |
 
 ## Development Dependencies
 
 | Package | Purpose |
 |---------|---------|
-| pytest | Unit testing |
 | aws-cdk-lib | Infrastructure as Code |
-| constructs | CDK constructs |
+| constructs | CDK constructs library |
+| pytest | Test framework |
+| pytest-cov | Coverage reporting |
+| moto | AWS service mocking |
 
----
+## Lambda Layers
 
-## AWS Services
+### EVTX Layer (`layers/evtx/`)
+- **Contents**: python-evtx library and dependencies
+- **Size**: ~2 MB
+- **Build**: `scripts/build_evtx_layer.sh`
 
-| Service | Purpose |
-|---------|---------|
-| Lambda | Serverless compute |
-| DynamoDB | Checkpoint storage |
-| SQS | Event queue |
-| EventBridge | Scheduled triggers |
-| S3 Access Points | FSx ONTAP access |
-| CloudWatch Logs | Logging |
-| IAM | Permissions |
+### Pillow Layer (`layers/pillow/`)
+- **Contents**: Pillow library with native bindings
+- **Size**: ~50 MB
+- **Build**: `scripts/build_pillow_layer.sh`
+- **Note**: Only needed for file_processor example
 
----
+## AWS Service Dependencies
 
-## External Systems
+| Service | Purpose | Required |
+|---------|---------|----------|
+| Amazon S3 | Access audit logs via Access Points | Yes |
+| Amazon DynamoDB | Checkpoint storage | Yes |
+| Amazon EventBridge | Event routing | Yes (primary) |
+| Amazon SQS | Event queuing | Optional |
+| Amazon SNS | Event fan-out | Optional |
+| Amazon CloudWatch Logs | Event persistence | Optional |
+| AWS Lambda | Compute | Yes |
+| AWS IAM | Permissions | Yes |
 
-| System | Integration |
-|--------|-------------|
-| FSx for NetApp ONTAP | File storage, audit logs |
-| ONTAP Audit Subsystem | Generates audit events |
+## External Dependencies
 
----
+| Dependency | Purpose |
+|------------|---------|
+| FSx for NetApp ONTAP | Source file system with audit logging |
+| S3 Access Points | Unified S3 interface to FSx volumes |
+| ONTAP Audit Configuration | Must be enabled on SVM |
 
-## Lambda Layer Contents
+## Version Constraints
 
-### EVTX Layer (`layers/evtx/python/`)
-```
-Evtx/           # python-evtx package
-hexdump.py      # Dependency
-```
-
-### Pillow Layer (`layers/pillow/python/`)
-```
-PIL/            # Pillow package
-pillow.libs/    # Native libraries
-```
+- **Python**: 3.12+ (Lambda runtime)
+- **CDK**: 2.x
+- **Node.js**: 18+ (for CDK CLI)
