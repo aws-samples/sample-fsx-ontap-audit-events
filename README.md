@@ -18,15 +18,43 @@ This project implements an event-driven architecture for detecting file operatio
 ## Architecture
 
 ```
-FSx ONTAP (NFS/SMB) → Audit Logs (S3) → EventBridge (Schedule) → Lambda (Audit Processor)
-                                                                        ↓
-                                                                   DynamoDB (Checkpoint)
-                                                                        ↓
-                                                                   EventBridge (Events)
-                                                                        ↓
-                                                            ┌───────────┼───────────┐
-                                                            ↓           ↓           ↓
-                                                          SQS         SNS    CloudWatch Logs
+┌─────────────────────────────────────────────────────────────────┐
+│                    FSx ONTAP (NFS/SMB)                          │
+│                  File Operations via Audit                      │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+                             ▼
+                    ┌─────────────────┐
+                    │  Audit Logs (S3) │
+                    └────────┬─────────┘
+                             │
+                             ▼
+                  ┌──────────────────────┐
+                  │ EventBridge Schedule │
+                  │   (Every 1 minute)   │
+                  └──────────┬───────────┘
+                             │
+                             ▼
+                 ┌───────────────────────┐
+                 │ Lambda Audit Processor │
+                 │  - Parse audit logs    │
+                 │  - Extract file events │
+                 └───────┬───────┬────────┘
+                         │       │
+                         │       └──────────────┐
+                         ▼                      ▼
+                 ┌──────────────┐      ┌──────────────┐
+                 │   DynamoDB   │      │  EventBridge │
+                 │  Checkpoint  │      │  Custom Bus  │
+                 └──────────────┘      └──────┬───────┘
+                                               │
+                         ┌─────────────────────┼─────────────────────┐
+                         │                     │                     │
+                         ▼                     ▼                     ▼
+                   ┌─────────┐         ┌─────────┐         ┌──────────────┐
+                   │   SQS   │         │   SNS   │         │  CloudWatch  │
+                   │  Queue  │         │  Topic  │         │     Logs     │
+                   └─────────┘         └─────────┘         └──────────────┘
 ```
 
 ### Components
@@ -300,9 +328,35 @@ This project includes an example Lambda function that automatically generates th
 **Architecture:**
 
 ```
-EventBridge (file-events) → EventBridge Rule → SQS Queue → Lambda (File Processor)
-                                                                      ↓
-                                                            FSx ONTAP (Output Volume)
+                 ┌──────────────┐
+                 │  EventBridge │
+                 │  Custom Bus  │
+                 └──────┬───────┘
+                        │
+                        ▼
+                ┌───────────────┐
+                │ EventBridge   │
+                │ Rule (Images) │
+                └───────┬───────┘
+                        │
+                        ▼
+                  ┌─────────┐
+                  │   SQS   │
+                  │  Queue  │
+                  └────┬────┘
+                       │
+                       ▼
+            ┌──────────────────────┐
+            │ Lambda File Processor │
+            │  - Read image         │
+            │  - Generate thumbnail │
+            └──────────┬────────────┘
+                       │
+                       ▼
+              ┌────────────────┐
+              │   FSx ONTAP    │
+              │ (Output Volume)│
+              └────────────────┘
 ```
 
 **Setup:**
