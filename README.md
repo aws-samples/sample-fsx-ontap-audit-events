@@ -245,6 +245,57 @@ aws dynamodb get-item \
   --key '{"pk": {"S": "tracker"}}'
 ```
 
+### Verifying EventBridge Events
+
+To confirm events are being delivered to EventBridge, create a temporary catch-all rule that sends events to CloudWatch Logs:
+
+```bash
+# 1. Create a log group for debug events
+aws logs create-log-group \
+  --log-group-name /aws/events/fsx-audit-debug \
+  --region <region>
+
+# 2. Allow EventBridge to write to CloudWatch Logs
+aws logs put-resource-policy \
+  --policy-name EventBridgeToCloudWatch \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Sid": "EventBridgeToLogs",
+      "Effect": "Allow",
+      "Principal": {"Service": "events.amazonaws.com"},
+      "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+      "Resource": "arn:aws:logs:<region>:<account-id>:log-group:/aws/events/*"
+    }]
+  }' \
+  --region <region>
+
+# 3. Create a rule matching all audit events
+aws events put-rule \
+  --name debug-catch-all \
+  --event-bus-name FsxAuditStack-file-events \
+  --event-pattern '{"source":["fsx.ontap.audit"]}' \
+  --region <region>
+
+# 4. Add CloudWatch Logs as the target
+aws events put-targets \
+  --rule debug-catch-all \
+  --event-bus-name FsxAuditStack-file-events \
+  --targets '[{"Id":"debug-logs","Arn":"arn:aws:logs:<region>:<account-id>:log-group:/aws/events/fsx-audit-debug"}]' \
+  --region <region>
+
+# 5. Tail the log group to see events arriving
+aws logs tail /aws/events/fsx-audit-debug --follow --region <region>
+```
+
+Clean up when done:
+
+```bash
+aws events remove-targets --rule debug-catch-all --event-bus-name FsxAuditStack-file-events --ids debug-logs --region <region>
+aws events delete-rule --name debug-catch-all --event-bus-name FsxAuditStack-file-events --region <region>
+aws logs delete-log-group --log-group-name /aws/events/fsx-audit-debug --region <region>
+```
+
 ## Troubleshooting
 
 ### No logs being processed

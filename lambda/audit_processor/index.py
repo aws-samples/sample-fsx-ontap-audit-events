@@ -1,3 +1,18 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy of
+# this software and associated documentation files (the "Software"), to deal in
+# the Software without restriction, including without limitation the rights to
+# use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+# the Software, and to permit persons to whom the Software is furnished to do so.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+# FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+# COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+# IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+# CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 """
 FSx ONTAP Audit Log Processor Lambda Function
 
@@ -58,11 +73,13 @@ else:
 
 # Try to import EVTX parser (optional)
 try:
-    from evtx import PyEvtxParser
+    from Evtx.Evtx import Evtx
+    from Evtx.Views import evtx_file_xml_view
+    import tempfile
     EVTX_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     EVTX_AVAILABLE = False
-    print("EVTX parser not available")
+    print(f"EVTX parser not available: {e}")
 
 
 def lambda_handler(event, context):
@@ -361,48 +378,94 @@ def parse_evtx_audit(content: bytes, log_key: str) -> List[Dict]:
         print("EVTX parser not available")
         return events
     
+    # Write bytes to temp file (python-evtx requires file path)
+    temp_file = None
     try:
-        parser = PyEvtxParser(content)
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.evtx') as temp_file:
+            temp_file.write(content)
+            temp_file_path = temp_file.name
         
-        for record in parser.records():
-            event_id = str(record.get('event_id', ''))
-            
-            # Filter for file creation (4656)
-            if event_id != '4656':
-                continue
-            
-            event_data = record.get('event_data', {})
-            object_type = event_data.get('ObjectType', '')
-            object_name = event_data.get('ObjectName', '')
-            
-            # Filter for files only
-            if object_type != 'File' or not object_name:
-                continue
-            
-            # Parse object name and computer
-            junction_path, file_path = parse_object_name(object_name)
-            computer = record.get('computer', '')
-            filesystem_id, svm_name = parse_computer(computer)
-            timestamp = record.get('timestamp', '')
-            
-            event = {
-                'file_path': file_path,
-                'junction_path': junction_path,
-                'svm_name': svm_name,
-                'filesystem_id': filesystem_id,
-                'operation': 'create',
-                'timestamp': timestamp,
-                'user': event_data.get('SubjectUserName', 'unknown'),
-                'user_ip': event_data.get('SubjectIP', ''),
-                'source_log': log_key,
-                'format': 'evtx',
-                'event_id': event_id
-            }
-            event['dedup_id'] = generate_event_id(file_path, timestamp, log_key)
-            events.append(event)
+        with Evtx(temp_file_path) as evtx:
+            for record in evtx.records():
+                try:
+                    # Parse XML from record
+                    xml_str = record.xml()
+                    root = ET.fromstring(xml_str)
+                    
+                    # NetApp ONTAP uses their own namespace
+                    ns = {'evt': 'http://schemas.netapp.com/events/event'}
+                    
+                    # Get Event ID
+                    event_id_elem = root.find('.//evt:EventID', ns)
+                    
+                    if event_id_elem is None:
+                        continue
+                    
+                    event_id = event_id_elem.text
+                    
+                    # Filter for file creation (4656)
+                    if event_id != '4656':
+                        continue
+                    
+                    # Extract event data
+                    event_data = {}
+                    for data_elem in root.findall('.//evt:Data', ns):
+                        name = data_elem.get('Name')
+                        if name:
+                            event_data[name] = data_elem.text or ''
+                    
+                    object_type = event_data.get('ObjectType', '')
+                    object_name = event_data.get('ObjectName', '')
+                    
+                    # Filter for files only
+                    if object_type != 'File' or not object_name:
+                        continue
+                    
+                    # Parse object name
+                    junction_path, file_path = parse_object_name(object_name)
+                    
+                    # Get computer/system info
+                    computer_elem = root.find('.//evt:Computer', ns)
+                    computer = computer_elem.text if computer_elem is not None else ''
+                    filesystem_id, svm_name = parse_computer(computer)
+                    
+                    # Get timestamp
+                    time_elem = root.find('.//evt:TimeCreated', ns)
+                    timestamp = time_elem.get('SystemTime', '') if time_elem is not None else ''
+                    
+                    # Get user IP
+                    user_ip = event_data.get('SubjectIP', '')
+                    
+                    event = {
+                        'file_path': file_path,
+                        'junction_path': junction_path,
+                        'svm_name': svm_name,
+                        'filesystem_id': filesystem_id,
+                        'operation': 'create',
+                        'timestamp': timestamp,
+                        'user': event_data.get('SubjectUserName', 'unknown'),
+                        'user_ip': user_ip,
+                        'source_log': log_key,
+                        'format': 'evtx',
+                        'event_id': event_id
+                    }
+                    event['dedup_id'] = generate_event_id(file_path, timestamp, log_key)
+                    events.append(event)
+                    
+                except Exception as e:
+                    print(f"Error parsing EVTX record: {e}")
+                    continue
     
     except Exception as e:
-        print(f"Error parsing EVTX: {e}")
+        print(f"Error parsing EVTX file: {e}")
+    finally:
+        # Clean up temp file
+        if temp_file:
+            try:
+                import os
+                os.unlink(temp_file_path)
+            except:
+                pass
     
     return events
 

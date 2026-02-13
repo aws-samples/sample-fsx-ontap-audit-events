@@ -158,6 +158,15 @@ Create rules filtering by `junction_path` to route different volumes to differen
 ### XML Parsing Bug Fix
 Never use `element or fallback` with ElementTree - always use `if element is None` due to Element truthiness behavior.
 
+### Verify EventBridge Delivery
+Create a temporary catch-all rule to send events to CloudWatch Logs. Requires:
+1. A `/aws/events/fsx-audit-debug` log group
+2. A `logs:put-resource-policy` allowing `events.amazonaws.com` to write to `/aws/events/*`
+3. An EventBridge rule on `FsxAuditStack-file-events` bus matching `{"source":["fsx.ontap.audit"]}`
+4. CloudWatch Logs target on that rule
+
+See README.md "Verifying EventBridge Events" for full commands.
+
 ## Common Tasks
 
 ### Add New Event Type
