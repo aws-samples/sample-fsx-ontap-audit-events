@@ -85,7 +85,8 @@ npm install -g aws-cdk
 ### 2. Setup Project
 
 ```bash
-cd /path/to/audits
+git clone https://github.com/aws-samples/fsxn-audit-event-processing
+cd fsxn-audit-event-processing/audits
 
 # Create virtual environment and install dependencies
 uv venv
