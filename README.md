@@ -308,6 +308,17 @@ cdk deploy -c event_types='{"create":true,"delete":true,"modify":true}'
 
 **⚠️ Volume Warning**: Enabling `modify` or `read` events can generate 10-100x more events. Start with `create` + `delete` and monitor costs before enabling high-volume events.
 
+### Event Volume Estimates
+
+Typical estimates (test with your workload):
+
+| Configuration | Events/Hour | Lambda Cost/Month | EventBridge Cost/Month |
+|---------------|-------------|-------------------|------------------------|
+| Create only | 100 | $0.50 | $0.05 |
+| Create + Delete | 200 | $0.75 | $0.10 |
+| + Modify | 5,000 | $5-10 | $5 |
+| + Read | 50,000 | $50-100 | $50 |
+
 ## Testing
 
 ### Unit Tests
@@ -421,6 +432,33 @@ aws logs delete-log-group --log-group-name /aws/events/fsx-audit-debug --region 
 - Verify audit logs are being written to FSx volume
 - Check Lambda has S3 permissions
 - Verify DynamoDB checkpoint is not stuck
+
+### No delete events appearing
+
+1. **Verify delete events are enabled**:
+   ```bash
+   aws lambda get-function-configuration \
+     --function-name FsxAuditStack-AuditLogProcessor-* \
+     --query 'Environment.Variables.EVENT_TYPES_CONFIG'
+   ```
+   Should show `"delete":true`
+
+2. **Check Lambda logs for Event ID 4660** (delete events):
+   ```bash
+   aws logs filter-pattern /aws/lambda/FsxAuditStack-AuditLogProcessor-* \
+     --filter-pattern "4660"
+   ```
+
+### Too many events (high volume)
+
+1. **Disable high-volume event types**:
+   ```bash
+   cdk deploy -c event_types='{"create":true,"delete":true,"modify":false,"read":false}'
+   ```
+
+2. **Add EventBridge filtering** to route only specific paths or operations
+
+3. **Reduce MAX_LOGS_PER_INVOCATION** if Lambda times out
 
 ## Key Design Decisions
 
