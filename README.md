@@ -88,21 +88,30 @@ audits/
 └── tests/                    # Unit & integration tests
 ```
 
+## Requirements
+
+### AWS Resources
+
+- **Amazon FSx for NetApp ONTAP file system** - Active file system with at least one Storage Virtual Machine (SVM)
+- **S3 Access Point** - Created for the audit volume where ONTAP writes audit logs
+- **AWS Account** - With permissions to create Lambda functions, DynamoDB tables, EventBridge resources, and IAM roles
+
+### Software Prerequisites
+
+- **Python 3.12+** - Required for Lambda runtime and local development
+- **uv** - Python package manager for dependency management
+- **AWS CDK CLI** - For infrastructure deployment
+  ```bash
+  npm install -g aws-cdk
+  ```
+- **Node.js** - Required for AWS CDK CLI (version 14.x or later)
+
+### Optional (for Examples)
+
+- **Additional S3 Access Points** - For file processing examples (data and output volumes)
+- **Linux EC2 Instance** - For NFS auditing configuration (with nfs4-acl-tools installed)
+
 ## Quick Start
-
-### Prerequisites
-
-1. **FSx ONTAP File System** with audit volume configured
-
-2. **S3 Access Point** for the audit volume
-
-3. **Python 3.12+** and **uv** package manager
-
-4. **AWS CDK CLI**:
-
-   ```bash
-   npm install -g aws-cdk
-   ```
 
 ### Setup
 
@@ -162,13 +171,14 @@ cdk deploy -c routing_config_path=./routes.json
 
 SSH to FSx ONTAP management endpoint and configure auditing:
 
+### Basic Audit Configuration
+
 ```bash
 # Create audit configuration with 1-minute rotation
 vserver audit create -vserver <svm-name> \
   -destination /audit \
   -format evtx \
-  -rotate-schedule-minute 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59 \
-  -guarantee true
+  -rotate-schedule-minute 0-59
 
 # Enable audit logging
 vserver audit enable -vserver <svm-name>
@@ -181,7 +191,73 @@ vserver audit show -vserver <svm-name>
 
 - **Format**: `xml` or `evtx` (both supported)
 - **Rotation**: Every minute for lowest latency
-- **Guarantee**: `true` for synchronous logging (no missed events)
+- **Guarantee**: `true` for synchronous logging (enabled by default)
+
+### NTFS Access Auditing (SMB)
+
+To audit file access events on NTFS volumes, configure System Audit Control Lists (SACLs):
+
+```bash
+# 1. Create a volume with NTFS security style
+volume create -volume ntfs -aggregate aggr1 -size 10G \
+  -security-style ntfs -type RW -junction-path /ntfs -vserver <svm-name>
+
+# 2. Create a share for the volume
+cifs share create -share-name ntfs -path /ntfs \
+  -share-properties oplocks,browsable,show-previous-versions -vserver <svm-name>
+
+# 3. Create an NTFS security descriptor (requires advanced privileges)
+set -privilege advanced
+vserver security file-directory ntfs create -ntfs-sd sd1 \
+  -vserver <svm-name> -owner DOMAIN\Admin
+
+# 4. Add NTFS SACL access control entries for success and failure
+vserver security file-directory ntfs sacl add -vserver <svm-name> \
+  -ntfs-sd sd1 -access-type failure -account Everyone -rights full-control
+
+vserver security file-directory ntfs sacl add -vserver <svm-name> \
+  -ntfs-sd sd1 -access-type success -account Everyone -rights full-control
+
+# 5. Create an audit policy
+vserver security file-directory policy create -policy-name policy1 -vserver <svm-name>
+
+# 6. Add a task to the security policy
+vserver security file-directory policy task add -vserver <svm-name> \
+  -policy-name policy1 -path /ntfs -security-type ntfs -ntfs-mode propagate \
+  -ntfs-sd sd1 -index-num 1 -access-control file-directory
+
+# 7. Apply the security policy
+vserver security file-directory apply -vserver <svm-name> -policy-name policy1
+```
+
+### UNIX Access Auditing (NFS)
+
+To audit file access events on UNIX volumes, configure NFSv4 ACLs with audit flags:
+
+```bash
+# 1. Enable NFSv4 ACL support
+vserver nfs modify -vserver <svm-name> -v4.0 enabled \
+  -v4.0-acl enabled -v4.1-acl enabled
+
+# 2. Create a volume with UNIX security style
+volume create -volume unix -aggregate aggr1 -size 10G \
+  -security-style unix -type RW -junction-path /unix -vserver <svm-name>
+
+# 3. Mount the volume on a Linux client
+mkdir /mnt/unix
+sudo mount -t nfs <svm-nas-endpoint>:/unix /mnt/unix
+
+# 4. Recursively add auditing flags to the directory
+nfs4_setfacl -R -a U:fdS:EVERYONE@:Cd /mnt/unix
+```
+
+**Audit Flags:**
+- `f` - Audit failed access attempts
+- `d` - Audit successful access attempts
+- `S` - Audit successful access (alternative)
+- `F` - Audit failed access (alternative)
+
+**Note**: For both NTFS and UNIX auditing, ensure the audit configuration is enabled (see Basic Audit Configuration above).
 
 ## Environment Variables
 
@@ -193,9 +269,40 @@ vserver audit show -vserver <svm-name>
 | `AUDIT_PREFIX` | Path prefix for audit logs (default: empty) |
 | `TABLE_NAME` | DynamoDB table name for checkpoint |
 | `EVENT_BUS_NAME` | EventBridge bus name for file events |
+| `EVENT_TYPES_CONFIG` | JSON config for event types to monitor (see below) |
 | `ROUTING_CONFIG` | JSON routing config (optional) |
 | `MAX_KEYS` | Maximum logs to process per run (default: 100) |
 | `MAX_LOGS_PER_INVOCATION` | Maximum logs to process per invocation (default: 10) |
+
+### Event Types Configuration
+
+Control which file operations trigger events:
+
+| Event Type | Description | Volume | Default |
+|------------|-------------|--------|---------|
+| `create` | File creation | Low | ✅ Enabled |
+| `delete` | File deletion | Low | ✅ Enabled |
+| `modify` | File writes/updates | High | ❌ Disabled |
+| `read` | File reads | Very High | ❌ Disabled |
+| `rename` | File renames | Moderate | ❌ Disabled |
+
+**Default configuration** (create + delete only):
+```json
+{
+  "create": true,
+  "delete": true,
+  "modify": false,
+  "read": false,
+  "rename": false
+}
+```
+
+**Enable modify events**:
+```bash
+cdk deploy -c event_types='{"create":true,"delete":true,"modify":true}'
+```
+
+**⚠️ Volume Warning**: Enabling `modify` or `read` events can generate 10-100x more events. Start with `create` + `delete` and monitor costs before enabling high-volume events.
 
 ## Testing
 
