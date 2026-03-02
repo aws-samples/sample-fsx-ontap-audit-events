@@ -60,13 +60,10 @@ audits/
 
 ### Software Prerequisites
 
+- **Node.js 14.x+** - Required for AWS CDK CLI
+- **AWS CDK CLI** - For infrastructure deployment
 - **Python 3.12+** - Required for Lambda runtime and local development
 - **uv** - Python package manager for dependency management
-- **AWS CDK CLI** - For infrastructure deployment
-  ```bash
-  npm install -g aws-cdk
-  ```
-- **Node.js** - Required for AWS CDK CLI (version 14.x or later)
 
 ### Optional (for Examples)
 
@@ -75,32 +72,34 @@ audits/
 
 ## Quick Start
 
-### Setup
+### 1. Install Tools
+
+```bash
+# Install uv (Python package manager)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install AWS CDK CLI
+npm install -g aws-cdk
+```
+
+### 2. Setup Project
 
 ```bash
 cd /path/to/audits
 
-# Install uv if not already installed
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Create and activate virtual environment
+# Create virtual environment and install dependencies
 uv venv
 source .venv/bin/activate
-
-# Install dependencies
 uv pip install -r requirements.txt
-uv pip install -r requirements-dev.txt
 
 # Build Lambda layers
 ./scripts/build_evtx_layer.sh
 ```
 
-### Deploy Infrastructure
+### 3. Deploy
 
 ```bash
 cd infra
-source ../.venv/bin/activate
-
 cdk deploy -c audit_s3_access_point_alias=audit-ap-xxxxx-s3alias
 ```
 
@@ -287,6 +286,7 @@ Typical estimates (test with your workload):
 
 ```bash
 source .venv/bin/activate
+uv pip install -r requirements-dev.txt
 pytest tests/ -v
 ```
 
