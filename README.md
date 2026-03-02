@@ -17,7 +17,7 @@ This project implements an event-driven architecture for detecting file operatio
 
 ## Architecture
 
-![FSx ONTAP Audit Event Processing Architecture](static/images/fsxn-audit.png)
+![FSx ONTAP Audit Event Processing Architecture](static/images/fsxn-audits.png)
 
 ### Components
 
