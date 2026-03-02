@@ -174,6 +174,10 @@ SSH to FSx ONTAP management endpoint and configure auditing:
 ### Basic Audit Configuration
 
 ```bash
+# Create a volume to store audit logs
+volume create -volume audit -vserver <svm-name> -aggregate aggr1 \
+  -size 10G -state online -security-style mixed -junction-path /audit
+
 # Create audit configuration with 1-minute rotation
 vserver audit create -vserver <svm-name> \
   -destination /audit \
