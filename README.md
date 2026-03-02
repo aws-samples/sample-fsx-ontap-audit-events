@@ -17,45 +17,7 @@ This project implements an event-driven architecture for detecting file operatio
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    FSx ONTAP (NFS/SMB)                          │
-│                  File Operations via Audit                      │
-└────────────────────────────┬────────────────────────────────────┘
-                             │
-                             ▼
-                    ┌─────────────────┐
-                    │  Audit Logs (S3) │
-                    └────────┬─────────┘
-                             │
-                             ▼
-                  ┌──────────────────────┐
-                  │ EventBridge Schedule │
-                  │   (Every 1 minute)   │
-                  └──────────┬───────────┘
-                             │
-                             ▼
-                 ┌───────────────────────┐
-                 │ Lambda Audit Processor │
-                 │  - Parse audit logs    │
-                 │  - Extract file events │
-                 └───────┬───────┬────────┘
-                         │       │
-                         │       └──────────────┐
-                         ▼                      ▼
-                 ┌──────────────┐      ┌──────────────┐
-                 │   DynamoDB   │      │  EventBridge │
-                 │  Checkpoint  │      │  Custom Bus  │
-                 └──────────────┘      └──────┬───────┘
-                                               │
-                         ┌─────────────────────┼─────────────────────┐
-                         │                     │                     │
-                         ▼                     ▼                     ▼
-                   ┌─────────┐         ┌─────────┐         ┌──────────────┐
-                   │   SQS   │         │   SNS   │         │  CloudWatch  │
-                   │  Queue  │         │  Topic  │         │     Logs     │
-                   └─────────┘         └─────────┘         └──────────────┘
-```
+![FSx ONTAP Audit Event Processing Architecture](static/images/fsxn-audit.png)
 
 ### Components
 
