@@ -75,10 +75,7 @@ audits/
 ### 1. Install Tools
 
 ```bash
-# Install uv (Python package manager)
 curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Install AWS CDK CLI
 npm install -g aws-cdk
 ```
 
@@ -87,13 +84,9 @@ npm install -g aws-cdk
 ```bash
 git clone https://github.com/aws-samples/sample-fsx-ontap-audit-events.git
 cd sample-fsx-ontap-audit-events
-
-# Create virtual environment and install dependencies
 uv venv
 source .venv/bin/activate
 uv pip install -r requirements.txt
-
-# Build Lambda layers
 ./scripts/build_evtx_layer.sh
 ```
 
