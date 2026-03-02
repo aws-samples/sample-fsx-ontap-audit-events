@@ -152,7 +152,7 @@ cat > routes.json << 'EOF'
 {
   "routes": [
     {"svm_name": "svm1", "junction_path": "unix", "destination_type": "sqs"},
-    {"svm_name": "svm2", "junction_path": "ntfs", "destination_type": "sns", "destination_arn": "arn:aws:sns:us-east-1:123456789:my-topic"},
+    {"svm_name": "svm2", "junction_path": "ntfs", "destination_type": "sns", "destination_arn": "arn:aws:sns:us-east-1:111122223333:my-topic"},
     {"svm_name": "svm3", "junction_path": "data", "destination_type": "cloudwatch_logs"}
   ]
 }
