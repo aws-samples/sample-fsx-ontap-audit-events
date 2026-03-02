@@ -86,7 +86,7 @@ npm install -g aws-cdk
 
 ```bash
 git clone https://github.com/aws-samples/sample-fsx-ontap-audit-events.git
-cd sample-fsx-ontap-audit-events/audits
+cd sample-fsx-ontap-audit-events
 
 # Create virtual environment and install dependencies
 uv venv
