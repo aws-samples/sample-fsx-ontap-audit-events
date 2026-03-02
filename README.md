@@ -114,7 +114,9 @@ cat > routes.json << 'EOF'
 EOF
 
 # Deploy with routing
-cdk deploy -c routing_config_path=./routes.json
+cdk deploy \
+  -c audit_s3_access_point_alias=audit-ap-xxxxx-s3alias \
+  -c routing_config_path=./routes.json
 ```
 
 **Routing Options:**
@@ -258,7 +260,9 @@ Control which file operations trigger events:
 
 **Enable modify events**:
 ```bash
-cdk deploy -c event_types='{"create":true,"delete":true,"modify":true}'
+cdk deploy \
+  -c audit_s3_access_point_alias=audit-ap-xxxxx-s3alias \
+  -c event_types='{"create":true,"delete":true,"modify":true}'
 ```
 
 **⚠️ Volume Warning**: Enabling `modify` or `read` events can generate 10-100x more events. Start with `create` + `delete` and monitor costs before enabling high-volume events.
@@ -409,7 +413,9 @@ aws logs delete-log-group --log-group-name /aws/events/fsx-audit-debug --region 
 
 1. **Disable high-volume event types**:
    ```bash
-   cdk deploy -c event_types='{"create":true,"delete":true,"modify":false,"read":false}'
+   cdk deploy \
+     -c audit_s3_access_point_alias=audit-ap-xxxxx-s3alias \
+     -c event_types='{"create":true,"delete":true,"modify":false,"read":false}'
    ```
 
 2. **Add EventBridge filtering** to route only specific paths or operations
