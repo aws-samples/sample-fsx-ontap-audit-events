@@ -40,6 +40,9 @@ deploy_example = app.node.try_get_context("deploy_example") or False
 # Optional: routing config file path
 routing_config_path = app.node.try_get_context("routing_config_path")
 
+# Optional: event types configuration
+event_types_config = app.node.try_get_context("event_types")
+
 FsxAuditStack(
     app,
     "FsxAuditStack",
@@ -50,6 +53,7 @@ FsxAuditStack(
     layers_path=layers_path,
     deploy_example=deploy_example,
     routing_config_path=routing_config_path,
+    event_types_config=event_types_config,
     # Uncomment to specify environment
     # env=cdk.Environment(account='486768734100', region='eu-west-1'),
 )

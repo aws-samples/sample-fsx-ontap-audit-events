@@ -25,7 +25,7 @@ import boto3
 import hashlib
 import json
 import os
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
 from datetime import datetime
 from typing import List, Dict, Optional
 
@@ -45,6 +45,31 @@ EVENT_BUS_NAME = os.environ.get('EVENT_BUS_NAME', '')
 MAX_KEYS = int(os.environ.get('MAX_KEYS', '100'))
 MAX_LOGS_PER_INVOCATION = int(os.environ.get('MAX_LOGS_PER_INVOCATION', '10'))
 ROUTING_CONFIG = os.environ.get('ROUTING_CONFIG', '')
+EVENT_TYPES_CONFIG = os.environ.get('EVENT_TYPES_CONFIG', '')
+
+# Default event types to monitor
+DEFAULT_EVENT_TYPES = {
+    'create': True,
+    'delete': True,
+    'modify': False,
+    'read': False,
+    'rename': False
+}
+
+# Parse event types config
+_event_types = DEFAULT_EVENT_TYPES.copy()
+if EVENT_TYPES_CONFIG:
+    try:
+        # Handle double-encoded JSON from CDK
+        user_config = EVENT_TYPES_CONFIG
+        if isinstance(user_config, str):
+            user_config = json.loads(user_config)
+        if isinstance(user_config, str):
+            user_config = json.loads(user_config)
+        _event_types.update(user_config)
+        print(f"Event types enabled: {[k for k, v in _event_types.items() if v]}")
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"Error parsing EVENT_TYPES_CONFIG: {e}, using defaults")
 
 # Parse routing config on module load
 _routes: Dict[tuple, Dict] = {}
@@ -80,6 +105,45 @@ try:
 except ImportError as e:
     EVTX_AVAILABLE = False
     print(f"EVTX parser not available: {e}")
+
+
+def should_process_event(event_id: str, access_mask: str = '', access_list: str = '') -> tuple:
+    """
+    Determine if event should be processed based on config.
+    Returns: (should_process: bool, operation: str)
+    """
+    combined_access = f"{access_mask} {access_list}".upper()
+    
+    # Event ID 4656: Object Open/Create
+    if event_id == '4656':
+        if _event_types.get('create'):
+            return True, 'create'
+    
+    # Event ID 4660: Object Delete
+    elif event_id == '4660':
+        if _event_types.get('delete'):
+            return True, 'delete'
+    
+    # Event ID 4663: Object Access (read/write/modify)
+    elif event_id == '4663':
+        # Check for write operations first (higher priority)
+        write_indicators = ['WRITE_DATA', 'WRITEDATA', 'APPEND_DATA', 'APPENDDATA', 
+                           'WRITE_EA', 'WRITEEA', 'WRITE_ATTRIBUTES', 'WRITEATTRIBUTES',
+                           '0X2', '0X4', '0X10', '0X100']
+        
+        if any(indicator in combined_access for indicator in write_indicators):
+            if _event_types.get('modify'):
+                return True, 'modify'
+        
+        # Check for read operations
+        read_indicators = ['READ_DATA', 'READDATA', 'READ_EA', 'READEA', 
+                          'READ_ATTRIBUTES', 'READATTRIBUTES', '0X1', '0X8', '0X80']
+        
+        if any(indicator in combined_access for indicator in read_indicators):
+            if _event_types.get('read'):
+                return True, 'read'
+    
+    return False, ''
 
 
 def lambda_handler(event, context):
@@ -323,8 +387,13 @@ def parse_xml_audit(content: bytes, log_key: str) -> List[Dict]:
             
             event_id = event_id_elem.text
             
-            # Filter for file creation (4656)
-            if event_id != '4656':
+            # Extract AccessMask and AccessList for operation detection
+            access_mask = get_event_data_value(event_data, 'AccessMask', ns, '')
+            access_list = get_event_data_value(event_data, 'AccessList', ns, '')
+            
+            # Check if we should process this event
+            should_process, operation = should_process_event(event_id, access_mask, access_list)
+            if not should_process:
                 continue
             
             # Extract object type and name
@@ -351,7 +420,7 @@ def parse_xml_audit(content: bytes, log_key: str) -> List[Dict]:
                 'junction_path': junction_path,
                 'svm_name': svm_name,
                 'filesystem_id': filesystem_id,
-                'operation': 'create',
+                'operation': operation,
                 'timestamp': timestamp,
                 'user': get_event_data_value(event_data, 'SubjectUserName', ns, 'unknown'),
                 'user_ip': get_event_data_value(event_data, 'SubjectIP', ns, ''),
@@ -359,7 +428,7 @@ def parse_xml_audit(content: bytes, log_key: str) -> List[Dict]:
                 'format': 'xml',
                 'event_id': event_id
             }
-            event['dedup_id'] = generate_event_id(file_path, timestamp, log_key)
+            event['dedup_id'] = generate_event_id(file_path, timestamp, log_key, operation)
             events.append(event)
     
     except Exception as e:
@@ -383,6 +452,7 @@ def parse_evtx_audit(content: bytes, log_key: str) -> List[Dict]:
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix='.evtx') as temp_file:
             temp_file.write(content)
+            temp_file.flush()
             temp_file_path = temp_file.name
         
         with Evtx(temp_file_path) as evtx:
@@ -403,16 +473,21 @@ def parse_evtx_audit(content: bytes, log_key: str) -> List[Dict]:
                     
                     event_id = event_id_elem.text
                     
-                    # Filter for file creation (4656)
-                    if event_id != '4656':
-                        continue
-                    
                     # Extract event data
                     event_data = {}
                     for data_elem in root.findall('.//evt:Data', ns):
                         name = data_elem.get('Name')
                         if name:
                             event_data[name] = data_elem.text or ''
+                    
+                    # Get AccessMask and AccessList for operation detection
+                    access_mask = event_data.get('AccessMask', '')
+                    access_list = event_data.get('AccessList', '')
+                    
+                    # Check if we should process this event
+                    should_process, operation = should_process_event(event_id, access_mask, access_list)
+                    if not should_process:
+                        continue
                     
                     object_type = event_data.get('ObjectType', '')
                     object_name = event_data.get('ObjectName', '')
@@ -441,7 +516,7 @@ def parse_evtx_audit(content: bytes, log_key: str) -> List[Dict]:
                         'junction_path': junction_path,
                         'svm_name': svm_name,
                         'filesystem_id': filesystem_id,
-                        'operation': 'create',
+                        'operation': operation,
                         'timestamp': timestamp,
                         'user': event_data.get('SubjectUserName', 'unknown'),
                         'user_ip': user_ip,
@@ -449,7 +524,7 @@ def parse_evtx_audit(content: bytes, log_key: str) -> List[Dict]:
                         'format': 'evtx',
                         'event_id': event_id
                     }
-                    event['dedup_id'] = generate_event_id(file_path, timestamp, log_key)
+                    event['dedup_id'] = generate_event_id(file_path, timestamp, log_key, operation)
                     events.append(event)
                     
                 except Exception as e:
@@ -486,9 +561,9 @@ def get_event_data_value(event_data, name: str, ns: dict, default: str = '') -> 
     return default
 
 
-def generate_event_id(file_path: str, timestamp: str, source_log: str) -> str:
+def generate_event_id(file_path: str, timestamp: str, source_log: str, operation: str = 'create') -> str:
     """Generate deterministic event ID for deduplication."""
-    content = f"{file_path}|{timestamp}|{source_log}"
+    content = f"{file_path}|{timestamp}|{source_log}|{operation}"
     return hashlib.sha256(content.encode()).hexdigest()[:16]
 
 

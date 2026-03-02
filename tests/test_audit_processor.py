@@ -19,7 +19,7 @@ Unit tests for audit processor Lambda function.
 
 import pytest
 import json
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
 from unittest.mock import Mock, patch, MagicMock
 import sys
 import os

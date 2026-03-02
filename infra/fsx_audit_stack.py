@@ -62,14 +62,25 @@ class FsxAuditStack(Stack):
         audit_prefix: str = "",
         deploy_example: bool = False,
         routing_config_path: str = None,
+        event_types_config: dict = None,
         **kwargs
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
+        # Default event types: create + delete enabled, modify/read/rename disabled
+        if event_types_config is None:
+            event_types_config = {
+                'create': True,
+                'delete': True,
+                'modify': False,
+                'read': False,
+                'rename': False
+            }
+
         # Load routing config if provided
         routing_config = None
         if routing_config_path and os.path.exists(routing_config_path):
-            with open(routing_config_path) as f:
+            with open(routing_config_path, encoding='utf-8') as f:
                 routing_config = json.load(f)
 
         # ============================================================
@@ -159,6 +170,7 @@ class FsxAuditStack(Stack):
                 "TABLE_NAME": state_table.table_name,
                 "EVENT_BUS_NAME": event_bus.event_bus_name,
                 "ROUTING_CONFIG": json.dumps(routing_config) if routing_config else "",
+                "EVENT_TYPES_CONFIG": json.dumps(event_types_config),
                 "MAX_KEYS": "100",
                 "MAX_LOGS_PER_INVOCATION": "10",
             },

@@ -148,7 +148,7 @@ def test_audit_log_parsing(audit_log_content: str, file_path: str):
     """Test audit log parsing logic."""
     print("\nTesting audit log parsing...")
     
-    import xml.etree.ElementTree as ET
+    import defusedxml.ElementTree as ET
     
     try:
         root = ET.fromstring(audit_log_content)
